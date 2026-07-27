@@ -75,6 +75,81 @@ struct BlockParserTests {
         )
     }
 
+    @Test func parsesDisplayNamesContainingParentheses() throws {
+        let url = URL(
+            fileURLWithPath: "/Volumes/Data/ONT/ValkyriaBot/blocks/merge_texts_advanced.js"
+        )
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+
+        let block = try BlockParser().parseFile(url)
+        let directory = url.deletingLastPathComponent()
+        let library = try BlockParser().parseDirectory(directory)
+        let sourceFiles = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        )
+        .filter {
+            guard $0.pathExtension.lowercased() == "js",
+                  let attributes = try? FileManager.default.attributesOfItem(
+                      atPath: $0.path
+                  ),
+                  let size = attributes[.size] as? NSNumber
+            else { return false }
+            return size.intValue > 0
+        }
+        .map(\.lastPathComponent)
+
+        #expect(block.name == "Merge Texts (Advanced)")
+        #expect(block.sourceFile == "merge_texts_advanced.js")
+        #expect(library.contains { $0.sourceFile == "merge_texts_advanced.js" })
+        let parsedFiles = Set(library.compactMap(\.sourceFile))
+        let missingFiles = Set(sourceFiles).subtracting(parsedFiles)
+        #expect(
+            missingFiles.isEmpty,
+            "Unparsed blocks: \(missingFiles.sorted().joined(separator: ", "))"
+        )
+    }
+
+    @Test func invalidatesDirectoryCacheWhenABlockFileChanges() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let blockURL = directory.appending(path: "cache_test.js")
+        try """
+        module.exports = {
+            name: "Before",
+            category: "Tests",
+            inputs: [],
+            options: [],
+            outputs: []
+        }
+        """.write(to: blockURL, atomically: true, encoding: .utf8)
+
+        let parser = BlockParser()
+        #expect(try parser.parseDirectory(directory).first?.name == "Before")
+        #expect(try parser.parseDirectory(directory).first?.name == "Before")
+
+        try """
+        module.exports = {
+            name: "After Cache Refresh",
+            category: "Tests",
+            inputs: [],
+            options: [],
+            outputs: []
+        }
+        """.write(to: blockURL, atomically: true, encoding: .utf8)
+
+        #expect(
+            try parser.parseDirectory(directory).first?.name
+                == "After Cache Refresh"
+        )
+    }
+
     @Test func evaluatesDynamicBlockMetadataFromSavedOptions() throws {
         let url = URL(
             fileURLWithPath: "/Volumes/Data/ONT/ValkyriaBot/blocks/send_message_multi.js"
@@ -126,5 +201,18 @@ struct BlockParserTests {
         #expect(!componentsV2Message.inputs.contains { $0.id == "poll" })
         #expect(!componentsV2Message.outputs.contains { $0.id == "interaction" })
         #expect(componentsV2Message.outputs.contains { $0.id == "message" })
+
+        let baseDefinition = try BlockParser().parseFile(url)
+        let configuredDefinition = BlockParser().configuredDefinition(
+            from: baseDefinition,
+            at: url,
+            optionValues: [
+                "type": .string("msg_send"),
+                "use-componentsv2": .boolean(true)
+            ]
+        )
+        #expect(configuredDefinition.inputs.contains { $0.id == "channel" })
+        #expect(configuredDefinition.inputs.contains { $0.id == "components" })
+        #expect(!configuredDefinition.inputs.contains { $0.id == "interaction" })
     }
 }

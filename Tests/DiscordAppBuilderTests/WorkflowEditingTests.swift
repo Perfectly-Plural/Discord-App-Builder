@@ -97,6 +97,52 @@ struct WorkflowEditingTests {
         #expect(!state.openWorkspaceIDs.contains(firstWorkspaceID))
     }
 
+    @Test func deletingCurrentWorkspaceCleansCacheAndSelectsAnotherOpenTab() throws {
+        let root = FileManager.default.temporaryDirectory.appending(
+            path: "DiscordAppBuilderWorkspaceDelete-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        let suiteName = "DiscordAppBuilderWorkspaceDeleteTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        var store = try ProjectStore.createProject(at: root.appending(path: "Bot"))
+        let firstWorkspaceID = try #require(store.workspaceReferences.first?.workspaceID)
+        let secondWorkspace = store.addWorkspace(named: "Second Workspace")
+        try store.save()
+
+        let state = AppState(
+            settingsStore: ApplicationSettingsStore(
+                applicationSupportDirectory: root.appending(path: "settings"),
+                userDefaults: defaults
+            )
+        )
+        let workspaceFile = store.projectURL
+            .appending(path: "data", directoryHint: .isDirectory)
+            .appending(path: ProjectStore.workspaceFileName)
+        #expect(state.importWorkspacesFile(workspaceFile))
+
+        state.selectWorkspace(secondWorkspace.workspaceID)
+        state.selectWorkspace(firstWorkspaceID)
+        state.addBlock(try #require(state.library.first))
+        #expect(state.workspaceIsDirty(firstWorkspaceID))
+
+        #expect(state.deleteWorkspaceImmediately(firstWorkspaceID))
+        #expect(state.currentWorkspaceID == secondWorkspace.workspaceID)
+        #expect(!state.openWorkspaceIDs.contains(firstWorkspaceID))
+        #expect(!state.workspaceReferences.contains {
+            $0.workspaceID == firstWorkspaceID
+        })
+        #expect(state.document.name == "Second Workspace")
+
+        let reopened = try ProjectStore.openProject(at: store.projectURL)
+        #expect(reopened.workspace(withID: firstWorkspaceID) == nil)
+        #expect(reopened.workspace(withID: secondWorkspace.workspaceID) != nil)
+    }
+
     @Test func displaysOnlyTheWorkspaceRelativeBlockID() {
         let block = WorkflowBlock(
             runtimeBlockID: "YNRW6AhSEK:14",
@@ -106,6 +152,46 @@ struct WorkflowEditingTests {
         )
 
         #expect(block.displayedBlockID(workspaceID: "YNRW6AhSEK") == "#14")
+    }
+
+    @Test func resizesUnlockedBlocksAndKeepsLockedBlocksFixed() {
+        let definition = testDefinition()
+        let unlocked = WorkflowBlock(
+            definition: definition,
+            position: CGPoint(x: 200, y: 160),
+            blockFileName: "unlocked"
+        )
+        var locked = WorkflowBlock(
+            definition: definition,
+            position: CGPoint(x: 500, y: 160),
+            blockFileName: "locked"
+        )
+        locked.isLocked = true
+
+        let state = AppState()
+        state.document = WorkflowDocument(
+            name: "Resize Test",
+            blocks: [unlocked, locked]
+        )
+
+        state.resizeBlock(
+            unlocked.id,
+            to: CGSize(width: 540, height: 360),
+            position: CGPoint(x: 320, y: 260)
+        )
+        state.resizeBlock(
+            locked.id,
+            to: CGSize(width: 700, height: 500),
+            position: CGPoint(x: 600, y: 300)
+        )
+
+        #expect(state.document.blocks[0].width == 540)
+        #expect(state.document.blocks[0].height == 360)
+        #expect(state.document.blocks[0].position == CGPoint(x: 320, y: 260))
+        #expect(state.document.blocks[1].width == locked.width)
+        #expect(state.document.blocks[1].height == locked.height)
+        #expect(state.document.blocks[1].position == locked.position)
+        #expect(state.isDirty)
     }
 
     @Test func copiesSettingsAndOnlyLinksBetweenSelectedBlocks() throws {

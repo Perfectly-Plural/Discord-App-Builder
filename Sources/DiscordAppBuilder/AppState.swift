@@ -2,10 +2,17 @@ import AppKit
 import Foundation
 import UniformTypeIdentifiers
 
+private struct WorkspaceClipboardPayload: Codable {
+    let workspace: ProjectWorkspace
+}
+
 @MainActor
 final class AppState: ObservableObject {
     private static let workflowPasteboardType = NSPasteboard.PasteboardType(
         "software.perfectlyplural.discord-app-builder.workflow-blocks"
+    )
+    private static let workspacePasteboardType = NSPasteboard.PasteboardType(
+        "software.perfectlyplural.discord-app-builder.workspace"
     )
     private let settingsStore: ApplicationSettingsStore
 
@@ -104,6 +111,13 @@ final class AppState: ObservableObject {
 
     func workspaceIsDirty(_ workspaceID: String) -> Bool {
         dirtyWorkspaceIDs.contains(workspaceID)
+    }
+
+    var canPasteWorkspace: Bool {
+        guard let data = NSPasteboard.general.data(forType: Self.workspacePasteboardType) else {
+            return false
+        }
+        return (try? JSONDecoder().decode(WorkspaceClipboardPayload.self, from: data)) != nil
     }
 
     func createProject() {
@@ -425,6 +439,173 @@ final class AppState: ObservableObject {
         }
     }
 
+    func moveWorkspace(_ workspaceID: String, to groupID: String) {
+        guard var store = projectStore else { return }
+        do {
+            try mergeDirtyWorkspaceCache(into: &store)
+            try store.moveWorkspace(workspaceID, to: groupID)
+            try store.save()
+            projectStore = store
+            clearDirtyWorkspaceState()
+            let category = store.groups.first(where: { $0.id == groupID })?.info.title
+                ?? "category"
+            importMessage = "Moved workspace to \(category)"
+        } catch {
+            importMessage = "Could not move workspace: \(error.localizedDescription)"
+        }
+    }
+
+    func setWorkspaceActive(_ workspaceID: String, active: Bool) {
+        guard var store = projectStore else { return }
+        do {
+            try mergeDirtyWorkspaceCache(into: &store)
+            try store.setWorkspace(workspaceID, active: active)
+            try store.save()
+            projectStore = store
+            clearDirtyWorkspaceState()
+            importMessage = active ? "Enabled workspace" : "Disabled workspace"
+        } catch {
+            importMessage = "Could not update workspace: \(error.localizedDescription)"
+        }
+    }
+
+    func copyWorkspace(_ workspaceID: String) {
+        guard var store = projectStore else { return }
+        do {
+            try mergeDirtyWorkspaceCache(into: &store)
+            guard let workspace = store.workspace(withID: workspaceID) else {
+                throw ProjectStoreError.workspaceNotFound
+            }
+            let payload = WorkspaceClipboardPayload(workspace: workspace)
+            let data = try JSONEncoder().encode(payload)
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setData(data, forType: Self.workspacePasteboardType)
+            pasteboard.setString(workspace.info.title, forType: .string)
+            importMessage = "Copied workspace \(workspace.info.title)"
+        } catch {
+            importMessage = "Could not copy workspace: \(error.localizedDescription)"
+        }
+    }
+
+    func pasteWorkspace(into groupID: String) {
+        guard let data = NSPasteboard.general.data(forType: Self.workspacePasteboardType),
+              let payload = try? JSONDecoder().decode(
+                  WorkspaceClipboardPayload.self,
+                  from: data
+              ),
+              var store = projectStore
+        else {
+            importMessage = "No workspace is available to paste"
+            return
+        }
+
+        do {
+            try mergeDirtyWorkspaceCache(into: &store)
+            let reference = try store.insertWorkspaceCopy(
+                payload.workspace,
+                into: groupID
+            )
+            try store.save()
+            projectStore = store
+            clearDirtyWorkspaceState()
+            try loadWorkspace(reference.workspaceID)
+            if !openWorkspaceIDs.contains(reference.workspaceID) {
+                openWorkspaceIDs.append(reference.workspaceID)
+            }
+            importMessage = "Pasted \(reference.title)"
+        } catch {
+            importMessage = "Could not paste workspace: \(error.localizedDescription)"
+        }
+    }
+
+    func duplicateWorkspace(_ workspaceID: String) {
+        guard var store = projectStore else { return }
+        do {
+            try mergeDirtyWorkspaceCache(into: &store)
+            guard let workspace = store.workspace(withID: workspaceID) else {
+                throw ProjectStoreError.workspaceNotFound
+            }
+            guard let groupID = store.groupID(containing: workspaceID) else {
+                throw ProjectStoreError.categoryNotFound
+            }
+            let reference = try store.insertWorkspaceCopy(workspace, into: groupID)
+            try store.save()
+            projectStore = store
+            clearDirtyWorkspaceState()
+            try loadWorkspace(reference.workspaceID)
+            if !openWorkspaceIDs.contains(reference.workspaceID) {
+                openWorkspaceIDs.append(reference.workspaceID)
+            }
+            importMessage = "Duplicated \(workspace.info.title)"
+        } catch {
+            importMessage = "Could not duplicate workspace: \(error.localizedDescription)"
+        }
+    }
+
+    func deleteWorkspace(_ workspaceID: String) {
+        guard let reference = workspaceReferences.first(where: {
+            $0.workspaceID == workspaceID
+        }) else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "Delete \(reference.title)?"
+        alert.informativeText = """
+        This permanently removes the workspace and all of its blocks, links, settings, and notes.
+        """
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        _ = deleteWorkspaceImmediately(workspaceID)
+    }
+
+    @discardableResult
+    func deleteWorkspaceImmediately(_ workspaceID: String) -> Bool {
+        guard var store = projectStore else { return false }
+        let wasCurrent = currentWorkspaceID == workspaceID
+        let tabIndex = openWorkspaceIDs.firstIndex(of: workspaceID)
+
+        do {
+            try mergeDirtyWorkspaceCache(into: &store)
+            let deleted = try store.deleteWorkspace(workspaceID)
+            try store.save()
+            projectStore = store
+            clearDirtyWorkspaceState()
+
+            openWorkspaceIDs.removeAll { $0 == workspaceID }
+            workspaceDocumentCache.removeValue(forKey: workspaceID)
+            dirtyWorkspaceIDs.remove(workspaceID)
+
+            if wasCurrent {
+                currentWorkspaceID = nil
+                let nextOpenID = tabIndex.flatMap { index in
+                    openWorkspaceIDs.isEmpty
+                        ? nil
+                        : openWorkspaceIDs[min(index, openWorkspaceIDs.count - 1)]
+                }
+                if let nextWorkspaceID = nextOpenID
+                    ?? store.workspaceReferences.first?.workspaceID {
+                    try loadWorkspace(nextWorkspaceID)
+                    if !openWorkspaceIDs.contains(nextWorkspaceID) {
+                        openWorkspaceIDs.append(nextWorkspaceID)
+                    }
+                } else {
+                    document = WorkflowDocument(name: projectName)
+                    clearSelection()
+                    pendingOutput = nil
+                    isDirty = false
+                }
+            }
+
+            importMessage = "Deleted \(deleted.info.title)"
+            return true
+        } catch {
+            importMessage = "Could not delete workspace: \(error.localizedDescription)"
+            return false
+        }
+    }
+
     func renameBlockFile(for blockID: WorkflowBlock.ID) {
         guard var store = projectStore,
               let currentWorkspaceID,
@@ -524,6 +705,26 @@ final class AppState: ObservableObject {
         guard let index = document.blocks.firstIndex(where: { $0.id == id }),
               !document.blocks[index].isLocked
         else { return }
+        document.blocks[index].position = position
+        isDirty = true
+    }
+
+    func resizeBlock(
+        _ id: WorkflowBlock.ID,
+        to size: CGSize,
+        position: CGPoint
+    ) {
+        guard let index = document.blocks.firstIndex(where: { $0.id == id }),
+              !document.blocks[index].isLocked
+        else { return }
+        document.blocks[index].width = max(
+            WorkflowBlock.minimumEditorWidth,
+            size.width
+        )
+        document.blocks[index].height = max(
+            WorkflowBlock.minimumEditorHeight,
+            size.height
+        )
         document.blocks[index].position = position
         isDirty = true
     }

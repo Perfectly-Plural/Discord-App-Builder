@@ -31,8 +31,14 @@ struct WorkflowPortPositionPreferenceKey: PreferenceKey {
     }
 }
 
+private enum BlockResizeCorner {
+    case bottomLeading
+    case bottomTrailing
+}
+
 struct WorkflowBlockView: View {
     @EnvironmentObject private var state: AppState
+    @Environment(\.colorScheme) private var colorScheme
     let block: WorkflowBlock
     let canvasScale: CGFloat
     let graphIndex: WorkflowGraphIndex
@@ -40,45 +46,77 @@ struct WorkflowBlockView: View {
     let onConnectionDragEnded: (WorkflowPortKey, CGPoint) -> Void
     @State private var dragOrigin: CGPoint?
     @State private var dragOffset = CGSize.zero
+    @State private var resizeOriginSize: CGSize?
+    @State private var resizeOriginPosition: CGPoint?
+    @State private var resizeSize: CGSize?
+    @State private var resizeCorner: BlockResizeCorner?
 
     private var isSelected: Bool {
         state.selectedBlockIDs.contains(block.id)
+    }
+
+    private var displayedWidth: CGFloat {
+        resizeSize?.width
+            ?? max(minimumContentWidth, block.width)
+    }
+
+    private var displayedHeight: CGFloat {
+        resizeSize?.height
+            ?? max(minimumContentHeight, block.height)
     }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             HStack(alignment: .top, spacing: 12) {
-                PortColumn(
-                    blockID: block.id,
-                    ports: block.definition.inputs,
-                    graphIndex: graphIndex,
-                    onConnectionDragChanged: onConnectionDragChanged,
-                    onConnectionDragEnded: onConnectionDragEnded
-                )
-                Spacer(minLength: 8)
-                PortColumn(
-                    blockID: block.id,
-                    ports: block.definition.outputs,
-                    graphIndex: graphIndex,
-                    onConnectionDragChanged: onConnectionDragChanged,
-                    onConnectionDragEnded: onConnectionDragEnded
-                )
-            }
-            .padding(10)
-
-            if !block.definition.options.isEmpty {
-                Divider()
-                VStack(alignment: .leading, spacing: 9) {
-                    ForEach(block.definition.options) { option in
-                        InlineOptionEditor(blockID: block.id, option: option)
-                    }
+                if !block.definition.inputs.isEmpty {
+                    PortColumn(
+                        blockID: block.id,
+                        ports: block.definition.inputs,
+                        graphIndex: graphIndex,
+                        onConnectionDragChanged: onConnectionDragChanged,
+                        onConnectionDragEnded: onConnectionDragEnded
+                    )
+                    .frame(width: portColumnWidth, alignment: .leading)
                 }
-                .padding(10)
+
+                if !block.definition.options.isEmpty {
+                    VStack(alignment: .leading, spacing: 9) {
+                        ForEach(block.definition.options) { option in
+                            InlineOptionEditor(
+                                blockID: block.id,
+                                option: option,
+                                textEditorHeight: textEditorHeight
+                            )
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                } else {
+                    Spacer(minLength: 8)
+                }
+
+                if !block.definition.outputs.isEmpty {
+                    PortColumn(
+                        blockID: block.id,
+                        ports: block.definition.outputs,
+                        graphIndex: graphIndex,
+                        onConnectionDragChanged: onConnectionDragChanged,
+                        onConnectionDragEnded: onConnectionDragEnded
+                    )
+                    .frame(width: portColumnWidth, alignment: .trailing)
+                }
             }
+            .padding(.top, 10)
+            .padding(.horizontal, 10)
+            .padding(.bottom, 28)
+            .frame(maxHeight: .infinity, alignment: .top)
         }
-        .frame(width: 260)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .frame(
+            width: displayedWidth,
+            height: displayedHeight,
+            alignment: .top
+        )
+        .background(blockBackgroundColor)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(
             RoundedRectangle(cornerRadius: 8)
@@ -89,8 +127,21 @@ struct WorkflowBlockView: View {
                 state.deleteBlock(block.id)
             }
         }
+        .overlay(alignment: .bottomLeading) {
+            if isSelected, !block.isLocked {
+                resizeHandle(for: .bottomLeading)
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if isSelected, !block.isLocked {
+                resizeHandle(for: .bottomTrailing)
+            }
+        }
         .shadow(color: .black.opacity(isSelected ? 0.16 : 0.08), radius: isSelected ? 7 : 3, y: 2)
-        .offset(dragOffset)
+        .offset(CGSize(
+            width: dragOffset.width + resizeOffset.width,
+            height: dragOffset.height + resizeOffset.height
+        ))
         .onTapGesture {
             state.selectBlock(
                 block.id,
@@ -99,23 +150,220 @@ struct WorkflowBlockView: View {
         }
     }
 
-    private var header: some View {
-        HStack {
-            Image(systemName: block.definition.autoExecute ? "bolt.fill" : "cube")
-                .foregroundStyle(block.definition.autoExecute ? .orange : .accentColor)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(block.definition.name)
-                    .font(.headline)
-                    .lineLimit(1)
-                    .onTapGesture(count: 2) {
-                        state.renameBlockFile(for: block.id)
-                    }
-                    .help("Double-click to rename the block's .js file")
-                Text("\(block.blockFileName).js - \(block.definition.category)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+    private var minimumContentWidth: CGFloat {
+        guard !block.definition.options.isEmpty else {
+            return WorkflowBlock.minimumEditorWidth
+        }
+        let connectorColumnCount = [
+            block.definition.inputs.isEmpty,
+            block.definition.outputs.isEmpty
+        ].filter { !$0 }.count
+        return 300 + CGFloat(connectorColumnCount * 90)
+    }
+
+    private var blockBackgroundColor: Color {
+        colorScheme == .dark
+            ? Color(red: 95 / 255, green: 95 / 255, blue: 95 / 255)
+            : Color(nsColor: .controlBackgroundColor)
+    }
+
+    private var headerBackgroundColor: Color {
+        colorScheme == .dark
+            ? Color(red: 50 / 255, green: 50 / 255, blue: 50 / 255)
+            : Color(nsColor: .underPageBackgroundColor)
+    }
+
+    private var portColumnWidth: CGFloat {
+        min(130, max(90, displayedWidth * 0.22))
+    }
+
+    private var textEditorHeight: CGFloat {
+        let textOptionCount = block.definition.options.filter {
+            $0.type == .text || $0.type == .unknown
+        }.count
+        guard textOptionCount > 0 else { return 30 }
+
+        let fixedEditorsHeight = block.definition.options.reduce(CGFloat.zero) {
+            partial, option in
+            guard option.type != .text, option.type != .unknown else {
+                return partial
             }
+            return partial + 26
+        }
+        let labelsHeight = CGFloat(block.definition.options.count * 20)
+        let spacingHeight = CGFloat(max(0, block.definition.options.count - 1) * 9)
+        let availableHeight = displayedHeight
+            - 40
+            - 38
+            - fixedEditorsHeight
+            - labelsHeight
+            - spacingHeight
+        return max(48, availableHeight / CGFloat(textOptionCount))
+    }
+
+    private var minimumContentHeight: CGFloat {
+        let inputRows = block.definition.inputs.reduce(0) {
+            $0 + renderedInstanceCount(for: $1)
+        }
+        let outputRows = block.definition.outputs.reduce(0) {
+            $0 + renderedInstanceCount(for: $1)
+        }
+        let portHeight = CGFloat(max(inputRows, outputRows, 1) * 32)
+
+        let optionHeight = block.definition.options.reduce(CGFloat.zero) {
+            partial, option in
+            partial + 20
+                + (option.type == .text || option.type == .unknown ? 48 : 26)
+        } + CGFloat(max(0, block.definition.options.count - 1) * 9)
+
+        return max(
+            WorkflowBlock.minimumEditorHeight,
+            40 + 38 + max(portHeight, optionHeight)
+        )
+    }
+
+    private func renderedInstanceCount(for port: BlockPort) -> Int {
+        guard port.allowsMultipleConnections else { return 1 }
+        let endpoint = WorkflowPortEndpoint(
+            blockID: block.id,
+            portID: port.id,
+            direction: port.direction
+        )
+        let connectionCount = graphIndex.connectionCount(for: endpoint)
+        let storedCount = port.direction == .input
+            ? graphIndex.storedInputCount(for: endpoint)
+            : 0
+        return max(connectionCount, storedCount) + 1
+    }
+
+    private var resizeOffset: CGSize {
+        guard let origin = resizeOriginSize,
+              let resizeSize,
+              let resizeCorner
+        else { return .zero }
+        let horizontalDirection: CGFloat = resizeCorner == .bottomTrailing
+            ? 1
+            : -1
+        return CGSize(
+            width: horizontalDirection * (resizeSize.width - origin.width) / 2,
+            height: (resizeSize.height - origin.height) / 2
+        )
+    }
+
+    private func resizeHandle(for corner: BlockResizeCorner) -> some View {
+        Image(systemName: "arrow.up.left.and.arrow.down.right")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(Color.accentColor)
+            .rotationEffect(corner == .bottomLeading ? .degrees(90) : .zero)
+            .frame(width: 26, height: 26)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 5))
+            .contentShape(Rectangle())
+            .gesture(blockResizeGesture(from: corner))
+            .padding(4)
+            .help(
+                corner == .bottomLeading
+                    ? "Drag the bottom-left corner to resize"
+                    : "Drag the bottom-right corner to resize"
+            )
+    }
+
+    private func blockResizeGesture(
+        from corner: BlockResizeCorner
+    ) -> some Gesture {
+        DragGesture(
+            minimumDistance: 2,
+            coordinateSpace: .named("workflowCanvas")
+        )
+        .onChanged { value in
+            guard !block.isLocked else { return }
+            if resizeOriginSize == nil {
+                resizeOriginSize = CGSize(
+                    width: displayedWidth,
+                    height: displayedHeight
+                )
+                resizeOriginPosition = block.position
+                resizeCorner = corner
+            }
+            guard let origin = resizeOriginSize else { return }
+            resizeSize = resizedBlockSize(
+                from: origin,
+                translation: value.translation,
+                corner: corner
+            )
+        }
+        .onEnded { value in
+            guard !block.isLocked,
+                  let originSize = resizeOriginSize,
+                  let originPosition = resizeOriginPosition
+            else {
+                resizeOriginSize = nil
+                resizeOriginPosition = nil
+                resizeSize = nil
+                resizeCorner = nil
+                return
+            }
+            let finalSize = resizedBlockSize(
+                from: originSize,
+                translation: value.translation,
+                corner: corner
+            )
+            let horizontalDirection: CGFloat = corner == .bottomTrailing
+                ? 1
+                : -1
+            let finalPosition = CGPoint(
+                x: originPosition.x
+                    + horizontalDirection
+                    * (finalSize.width - originSize.width) / 2,
+                y: originPosition.y + (finalSize.height - originSize.height) / 2
+            )
+            state.resizeBlock(
+                block.id,
+                to: finalSize,
+                position: finalPosition
+            )
+            resizeOriginSize = nil
+            resizeOriginPosition = nil
+            resizeSize = nil
+            resizeCorner = nil
+        }
+    }
+
+    private func resizedBlockSize(
+        from origin: CGSize,
+        translation: CGSize,
+        corner: BlockResizeCorner
+    ) -> CGSize {
+        let horizontalTranslation = corner == .bottomTrailing
+            ? translation.width
+            : -translation.width
+        return CGSize(
+            width: max(
+                minimumContentWidth,
+                origin.width + horizontalTranslation / canvasScale
+            ),
+            height: max(
+                minimumContentHeight,
+                origin.height + translation.height / canvasScale
+            )
+        )
+    }
+
+    private var header: some View {
+        HStack(spacing: 6) {
+            Image(systemName: block.definition.autoExecute ? "bolt.fill" : "cube")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(block.definition.autoExecute ? .orange : .accentColor)
+            Text(block.definition.name)
+                .font(.callout.weight(.semibold))
+                .lineLimit(1)
+                .onTapGesture(count: 2) {
+                    state.renameBlockFile(for: block.id)
+                }
+                .help("Double-click to rename \(block.blockFileName).js")
+            Text("[\(block.definition.category)]")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
             Spacer()
             if let displayedBlockID = block.displayedBlockID(
                 workspaceID: state.currentWorkspaceID
@@ -124,10 +372,14 @@ struct WorkflowBlockView: View {
                     .font(.caption.monospaced().weight(.semibold))
                     .foregroundStyle(.secondary)
                     .help("Block ID")
-            }
+                }
         }
-        .padding(10)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .padding(.horizontal, 9)
+        .frame(height: 40)
+        .background(headerBackgroundColor)
+        .overlay(alignment: .bottom) {
+            Divider()
+        }
         .contentShape(Rectangle())
         .gesture(blockDragGesture)
     }
@@ -199,8 +451,10 @@ private struct MiddleClickCaptureView: NSViewRepresentable {
 
 private struct InlineOptionEditor: View {
     @EnvironmentObject private var state: AppState
+    @Environment(\.colorScheme) private var colorScheme
     let blockID: WorkflowBlock.ID
     let option: BlockOption
+    let textEditorHeight: CGFloat
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -210,15 +464,50 @@ private struct InlineOptionEditor: View {
 
             switch option.type {
             case .select:
-                Picker(option.name, selection: value) {
-                    ForEach(choiceKeys, id: \.self) { key in
-                        Text(option.choices[key] ?? key)
-                            .tag(key)
+                if usesReferencePalette {
+                    ZStack {
+                        referenceMenuLabel(
+                            option.choices[value.wrappedValue]
+                                ?? value.wrappedValue
+                        )
+
+                        Menu {
+                            ForEach(choiceKeys, id: \.self) { key in
+                                Button {
+                                    value.wrappedValue = key
+                                } label: {
+                                    if value.wrappedValue == key {
+                                        Label(
+                                            option.choices[key] ?? key,
+                                            systemImage: "checkmark"
+                                        )
+                                    } else {
+                                        Text(option.choices[key] ?? key)
+                                    }
+                                }
+                            }
+                        } label: {
+                            Color.clear
+                                .frame(maxWidth: .infinity, minHeight: 28)
+                                .contentShape(Rectangle())
+                        }
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
+                        .frame(maxWidth: .infinity, minHeight: 28)
                     }
+                    .modifier(ReferenceMenuSurface())
+                    .environment(\.colorScheme, .light)
+                } else {
+                    Picker(option.name, selection: value) {
+                        ForEach(choiceKeys, id: \.self) { key in
+                            Text(option.choices[key] ?? key)
+                                .tag(key)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .frame(maxWidth: .infinity, alignment: .leading)
             case .color:
                 HStack(spacing: 7) {
                     Circle()
@@ -226,33 +515,123 @@ private struct InlineOptionEditor: View {
                         .frame(width: 15, height: 15)
                         .overlay(Circle().stroke(Color.secondary.opacity(0.45)))
                     TextField("#5865F2", text: value)
-                        .textFieldStyle(.roundedBorder)
+                        .modifier(
+                            InlineOptionTextFieldStyle(
+                                usesReferencePalette: usesReferencePalette
+                            )
+                        )
                 }
             case .number:
                 TextField("0", text: value)
-                    .textFieldStyle(.roundedBorder)
+                    .modifier(
+                        InlineOptionTextFieldStyle(
+                            usesReferencePalette: usesReferencePalette
+                        )
+                    )
             case .checkbox:
                 Toggle("", isOn: booleanValue)
                     .labelsHidden()
                     .toggleStyle(.switch)
             case .multiselect:
-                Menu {
-                    ForEach(choiceKeys, id: \.self) { key in
-                        Toggle(
-                            option.choices[key] ?? key,
-                            isOn: multiSelectBinding(for: key)
-                        )
+                if usesReferencePalette {
+                    ZStack {
+                        referenceMenuLabel(multiSelectSummary)
+
+                        Menu {
+                            ForEach(choiceKeys, id: \.self) { key in
+                                Toggle(
+                                    option.choices[key] ?? key,
+                                    isOn: multiSelectBinding(for: key)
+                                )
+                            }
+                        } label: {
+                            Color.clear
+                                .frame(maxWidth: .infinity, minHeight: 28)
+                                .contentShape(Rectangle())
+                        }
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
+                        .frame(maxWidth: .infinity, minHeight: 28)
                     }
-                } label: {
-                    Text(multiSelectSummary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    .modifier(ReferenceMenuSurface())
+                    .environment(\.colorScheme, .light)
+                } else {
+                    Menu {
+                        ForEach(choiceKeys, id: \.self) { key in
+                            Toggle(
+                                option.choices[key] ?? key,
+                                isOn: multiSelectBinding(for: key)
+                            )
+                        }
+                    } label: {
+                        Text(multiSelectSummary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .frame(maxWidth: .infinity)
                 }
             case .text, .unknown:
-                TextField("", text: value)
-                    .textFieldStyle(.roundedBorder)
+                TextEditor(text: value)
+                    .font(.body)
+                    .scrollContentBackground(.hidden)
+                    .foregroundStyle(fieldForegroundColor)
+                    .padding(4)
+                    .frame(
+                        maxWidth: .infinity,
+                        minHeight: textEditorHeight,
+                        maxHeight: textEditorHeight
+                    )
+                    .background(
+                        fieldBackgroundColor,
+                        in: RoundedRectangle(cornerRadius: 5)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(fieldBorderColor)
+                    }
+                    .environment(\.colorScheme, controlColorScheme)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .help(option.description)
+    }
+
+    private var usesReferencePalette: Bool {
+        colorScheme == .dark
+    }
+
+    private var controlColorScheme: ColorScheme {
+        usesReferencePalette ? .light : colorScheme
+    }
+
+    private var fieldBackgroundColor: Color {
+        usesReferencePalette
+            ? Color(red: 243 / 255, green: 243 / 255, blue: 243 / 255)
+            : Color(nsColor: .textBackgroundColor)
+    }
+
+    private var fieldForegroundColor: Color {
+        usesReferencePalette ? .black : .primary
+    }
+
+    private var fieldBorderColor: Color {
+        usesReferencePalette
+            ? Color.black.opacity(0.45)
+            : Color.secondary.opacity(0.35)
+    }
+
+    private func referenceMenuLabel(_ title: String) -> some View {
+        HStack(spacing: 8) {
+            Text(title.isEmpty ? "None" : title)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.caption.weight(.semibold))
+        }
+        .foregroundStyle(Color.black)
+        .padding(.horizontal, 8)
+        .frame(maxWidth: .infinity, minHeight: 28)
+        .contentShape(Rectangle())
     }
 
     private var value: Binding<String> {
@@ -339,6 +718,49 @@ private struct InlineOptionEditor: View {
     }
 }
 
+private struct ReferenceMenuSurface: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .frame(maxWidth: .infinity, minHeight: 28)
+            .background(
+                Color(red: 243 / 255, green: 243 / 255, blue: 243 / 255),
+                in: RoundedRectangle(cornerRadius: 5)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(Color.black.opacity(0.45))
+            }
+            .contentShape(Rectangle())
+    }
+}
+
+private struct InlineOptionTextFieldStyle: ViewModifier {
+    let usesReferencePalette: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if usesReferencePalette {
+            content
+                .textFieldStyle(.plain)
+                .foregroundStyle(.black)
+                .padding(.horizontal, 6)
+                .frame(minHeight: 24)
+                .background(
+                    Color(red: 243 / 255, green: 243 / 255, blue: 243 / 255),
+                    in: RoundedRectangle(cornerRadius: 5)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 5)
+                        .stroke(Color.black.opacity(0.45))
+                }
+                .environment(\.colorScheme, .light)
+        } else {
+            content
+                .textFieldStyle(.roundedBorder)
+        }
+    }
+}
+
 private struct PortColumn: View {
     let blockID: WorkflowBlock.ID
     let ports: [BlockPort]
@@ -403,7 +825,10 @@ private struct PortButton: View {
             if port.direction == .input { dot }
             Text(port.name)
                 .font(.caption)
-                .lineLimit(1)
+                .lineLimit(2)
+                .multilineTextAlignment(
+                    port.direction == .input ? .leading : .trailing
+                )
             if showsOccurrence {
                 Text("\(occurrence + 1)")
                     .font(.caption2.monospacedDigit())

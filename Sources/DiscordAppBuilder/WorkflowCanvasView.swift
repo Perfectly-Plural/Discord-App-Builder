@@ -120,7 +120,12 @@ struct WorkflowCanvasView: View {
                         else { return }
                         blockPickerPosition = position
                     },
-                    onScroll: zoom
+                    onScroll: zoom,
+                    onDelete: {
+                        guard state.hasSelection else { return false }
+                        state.deleteSelection()
+                        return true
+                    }
                 )
 
                 if let position = blockPickerPosition {
@@ -491,25 +496,48 @@ private struct BlockContextPicker: View {
 private struct CanvasEventCaptureView: NSViewRepresentable {
     let onRightClick: (CGPoint) -> Void
     let onScroll: (CGPoint, CGFloat, Bool) -> Void
+    let onDelete: () -> Bool
 
     func makeNSView(context: Context) -> CanvasEventView {
         let view = CanvasEventView()
         view.onRightClick = onRightClick
         view.onScroll = onScroll
+        view.onDelete = onDelete
         return view
     }
 
     func updateNSView(_ nsView: CanvasEventView, context: Context) {
         nsView.onRightClick = onRightClick
         nsView.onScroll = onScroll
+        nsView.onDelete = onDelete
+    }
+
+    static func dismantleNSView(
+        _ nsView: CanvasEventView,
+        coordinator: ()
+    ) {
+        nsView.stopMonitoringKeys()
     }
 
     final class CanvasEventView: NSView {
         var onRightClick: ((CGPoint) -> Void)?
         var onScroll: ((CGPoint, CGFloat, Bool) -> Void)?
+        var onDelete: (() -> Bool)?
+        private var keyMonitor: Any?
 
         override var isFlipped: Bool {
             true
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            stopMonitoringKeys()
+            guard window != nil else { return }
+            keyMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: .keyDown
+            ) { [weak self] event in
+                self?.handleKeyDown(event) ?? event
+            }
         }
 
         override func hitTest(_ point: NSPoint) -> NSView? {
@@ -528,6 +556,31 @@ private struct CanvasEventCaptureView: NSViewRepresentable {
             let position = convert(event.locationInWindow, from: nil)
             onScroll?(position, event.scrollingDeltaY, event.hasPreciseScrollingDeltas)
         }
+
+        func stopMonitoringKeys() {
+            if let keyMonitor {
+                NSEvent.removeMonitor(keyMonitor)
+                self.keyMonitor = nil
+            }
+        }
+
+        private func handleKeyDown(_ event: NSEvent) -> NSEvent? {
+            guard event.window === window,
+                  event.keyCode == 51 || event.keyCode == 117,
+                  event.modifierFlags.intersection([
+                      .command,
+                      .control,
+                      .option,
+                      .shift
+                  ]).isEmpty,
+                  !(window?.firstResponder is NSTextView),
+                  onDelete?() == true
+            else {
+                return event
+            }
+            return nil
+        }
+
     }
 }
 

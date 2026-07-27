@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ProjectRailView: View {
     @EnvironmentObject private var state: AppState
+    private let railWidth: CGFloat = 88
 
     var body: some View {
         VStack(spacing: 10) {
@@ -26,7 +27,7 @@ struct ProjectRailView: View {
             }
             .padding(.bottom, 10)
         }
-        .frame(width: 72)
+        .frame(width: railWidth)
         .background(Color(nsColor: .underPageBackgroundColor))
     }
 
@@ -50,7 +51,7 @@ struct ProjectRailView: View {
                             .stroke(isSelected ? Color.white.opacity(0.8) : Color.clear, lineWidth: 2)
                     }
             }
-            .frame(width: 64)
+            .frame(width: railWidth - 8)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

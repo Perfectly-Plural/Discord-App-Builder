@@ -260,6 +260,46 @@ enum ProjectTemplates {
     const configPath = path.join(projectPath, 'data', 'config.json')
     const rootConfigPath = path.join(projectPath, 'config')
     const workspacePath = path.join(projectPath, 'data', 'workspaces.json')
+    const clientReadyEvent = DiscordJSModule.Events?.ClientReady || 'ready'
+    const clientEventCompatibilityKey = Symbol.for(
+      'discord-app-builder.client-event-compatibility'
+    )
+
+    function installClientEventCompatibility(client) {
+      if (!client || client[clientEventCompatibilityKey] || clientReadyEvent === 'ready') {
+        return
+      }
+
+      const eventMethods = [
+        'addListener',
+        'on',
+        'once',
+        'prependListener',
+        'prependOnceListener',
+        'removeListener',
+        'off',
+        'removeAllListeners',
+        'listeners',
+        'rawListeners',
+        'listenerCount'
+      ]
+      for (const method of eventMethods) {
+        const original = client[method]
+        if (typeof original !== 'function') continue
+        client[method] = function readyEventCompatible(eventName, ...args) {
+          if (arguments.length === 0) return original.call(this)
+          const normalizedEvent = eventName === 'ready'
+            ? clientReadyEvent
+            : eventName
+          return original.call(this, normalizedEvent, ...args)
+        }
+      }
+      Object.defineProperty(client, clientEventCompatibilityKey, {
+        value: true,
+        configurable: false,
+        enumerable: false
+      })
+    }
 
     function readJSON(file, fallback) {
       try {
@@ -304,6 +344,7 @@ enum ProjectTemplates {
 
     class BotRuntime {
       constructor(client, groups) {
+        installClientEventCompatibility(client)
         this.client = client
         this.events = client
         this.console = (level, ...values) => {
@@ -428,10 +469,11 @@ enum ProjectTemplates {
           `[Discord App Builder] Starting ${this.Config.application.name} v${this.Config.application.version}`
         )
         this.load()
+        this.configureClientListenerCapacity()
         const token = readBotToken()
         const ready = this.client.isReady()
           ? Promise.resolve()
-          : new Promise(resolve => this.client.once('ready', resolve))
+          : new Promise(resolve => this.client.once(clientReadyEvent, resolve))
         await this.client.login(token)
         await ready
         console.log(`[Discord App Builder] Logged in as ${this.client.user.tag}`)
@@ -460,6 +502,22 @@ enum ProjectTemplates {
         }
         for (const item of initialization) {
           await this.execute(item)
+        }
+      }
+
+      configureClientListenerCapacity() {
+        if (
+          typeof this.client?.getMaxListeners !== 'function' ||
+          typeof this.client?.setMaxListeners !== 'function'
+        ) {
+          return
+        }
+        const currentLimit = this.client.getMaxListeners()
+        if (currentLimit === 0) return
+
+        const requiredLimit = Math.max(25, this.blocks.length * 2 + 10)
+        if (currentLimit < requiredLimit) {
+          this.client.setMaxListeners(requiredLimit)
         }
       }
 

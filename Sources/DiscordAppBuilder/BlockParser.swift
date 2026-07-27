@@ -74,30 +74,99 @@ private final class CachedBlockDefinition: NSObject {
     }
 }
 
-private enum BlockDefinitionCache {
-    nonisolated(unsafe) static let base = NSCache<NSString, CachedBlockDefinition>()
-    nonisolated(unsafe) static let configured = NSCache<NSString, CachedBlockDefinition>()
+private final class CachedBlockLibrary: NSObject {
+    let definitions: [BlockDefinition]
 
-    static func configure() {
-        base.countLimit = 512
-        configured.countLimit = 1_024
+    init(definitions: [BlockDefinition]) {
+        self.definitions = definitions
     }
 }
 
-struct BlockParser {
+private final class ParsedBlockCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var definitions: [BlockDefinition] = []
+
+    func append(_ definition: BlockDefinition) {
+        lock.lock()
+        definitions.append(definition)
+        lock.unlock()
+    }
+
+    func snapshot() -> [BlockDefinition] {
+        lock.lock()
+        defer { lock.unlock() }
+        return definitions
+    }
+}
+
+private enum BlockDefinitionCache {
+    nonisolated(unsafe) static let base = NSCache<NSString, CachedBlockDefinition>()
+    nonisolated(unsafe) static let configured = NSCache<NSString, CachedBlockDefinition>()
+    nonisolated(unsafe) static let latestByPath = NSCache<NSString, CachedBlockDefinition>()
+    nonisolated(unsafe) static let directories = NSCache<NSString, CachedBlockLibrary>()
+
+    static func configure() {
+        base.countLimit = 2_048
+        configured.countLimit = 4_096
+        latestByPath.countLimit = 2_048
+        directories.countLimit = 24
+    }
+}
+
+struct BlockParser: Sendable {
     func parseDirectory(_ url: URL) throws -> [BlockDefinition] {
+        BlockDefinitionCache.configure()
         let files = try FileManager.default.contentsOfDirectory(
             at: url,
-            includingPropertiesForKeys: nil
+            includingPropertiesForKeys: [
+                .contentModificationDateKey,
+                .fileSizeKey
+            ]
         )
-        return files
+        let revisions = files
             .filter { $0.pathExtension.lowercased() == "js" }
-            .compactMap { try? parseFile($0) }
+            .map { file in
+                let values = try? file.resourceValues(forKeys: [
+                    .contentModificationDateKey,
+                    .fileSizeKey
+                ])
+                return (
+                    url: file,
+                    revisionKey: fileRevisionKey(for: file, resourceValues: values)
+                )
+            }
+            .sorted { $0.url.path < $1.url.path }
+        let directoryCacheKey = revisions
+            .map(\.revisionKey)
+            .joined(separator: "\n")
+        if let cached = BlockDefinitionCache.directories.object(
+            forKey: directoryCacheKey as NSString
+        ) {
+            return cached.definitions
+        }
+
+        let collector = ParsedBlockCollector()
+        DispatchQueue.concurrentPerform(iterations: revisions.count) { index in
+            let file = revisions[index]
+            if let definition = try? parseFile(
+                file.url,
+                optionValues: [:],
+                revisionKey: file.revisionKey
+            ) {
+                collector.append(definition)
+            }
+        }
+        let definitions = collector.snapshot()
             .sorted { lhs, rhs in
                 lhs.category == rhs.category
                     ? lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
                     : lhs.category.localizedCaseInsensitiveCompare(rhs.category) == .orderedAscending
             }
+        BlockDefinitionCache.directories.setObject(
+            CachedBlockLibrary(definitions: definitions),
+            forKey: directoryCacheKey as NSString
+        )
+        return definitions
     }
 
     func parseFile(
@@ -105,10 +174,41 @@ struct BlockParser {
         optionValues: [String: JSONValue] = [:]
     ) throws -> BlockDefinition {
         BlockDefinitionCache.configure()
-        let baseCacheKey = fileRevisionKey(for: url)
+        return try parseFile(
+            url,
+            optionValues: optionValues,
+            revisionKey: fileRevisionKey(for: url)
+        )
+    }
+
+    func configuredDefinition(
+        from baseDefinition: BlockDefinition,
+        at url: URL,
+        optionValues: [String: JSONValue]
+    ) -> BlockDefinition {
+        BlockDefinitionCache.configure()
+        let pathKey = url.standardizedFileURL.path as NSString
+        guard let cached = BlockDefinitionCache.latestByPath.object(forKey: pathKey) else {
+            return (try? parseFile(url, optionValues: optionValues)) ?? baseDefinition
+        }
+        guard cached.usesDynamicMetadata else {
+            return baseDefinition
+        }
+        return (try? parseFile(url, optionValues: optionValues)) ?? baseDefinition
+    }
+
+    private func parseFile(
+        _ url: URL,
+        optionValues: [String: JSONValue],
+        revisionKey baseCacheKey: String
+    ) throws -> BlockDefinition {
         if let cached = BlockDefinitionCache.base.object(
             forKey: baseCacheKey as NSString
         ), !cached.usesDynamicMetadata {
+            BlockDefinitionCache.latestByPath.setObject(
+                cached,
+                forKey: url.standardizedFileURL.path as NSString
+            )
             return cached.definition
         }
 
@@ -116,6 +216,10 @@ struct BlockParser {
         if let cached = BlockDefinitionCache.configured.object(
             forKey: configuredCacheKey as NSString
         ) {
+            BlockDefinitionCache.latestByPath.setObject(
+                cached,
+                forKey: url.standardizedFileURL.path as NSString
+            )
             return cached.definition
         }
 
@@ -162,15 +266,31 @@ struct BlockParser {
             cached,
             forKey: configuredCacheKey as NSString
         )
+        BlockDefinitionCache.latestByPath.setObject(
+            cached,
+            forKey: url.standardizedFileURL.path as NSString
+        )
         return definition
     }
 
-    private func fileRevisionKey(for url: URL) -> String {
+    private func fileRevisionKey(
+        for url: URL,
+        resourceValues: URLResourceValues? = nil
+    ) -> String {
         let path = url.standardizedFileURL.path
-        let attributes = try? FileManager.default.attributesOfItem(atPath: path)
-        let modified = (attributes?[.modificationDate] as? Date)?
-            .timeIntervalSinceReferenceDate ?? -1
-        let size = (attributes?[.size] as? NSNumber)?.uint64Value ?? 0
+        let needsFallback = resourceValues?.contentModificationDate == nil
+            || resourceValues?.fileSize == nil
+        let attributes = needsFallback
+            ? try? FileManager.default.attributesOfItem(atPath: path)
+            : nil
+        let modified = resourceValues?.contentModificationDate?
+            .timeIntervalSinceReferenceDate
+            ?? (attributes?[.modificationDate] as? Date)?
+                .timeIntervalSinceReferenceDate
+            ?? -1
+        let size = resourceValues?.fileSize.map(UInt64.init)
+            ?? (attributes?[.size] as? NSNumber)?.uint64Value
+            ?? 0
         return "\(path)|\(modified)|\(size)"
     }
 
@@ -414,10 +534,40 @@ struct BlockParser {
 
     private func objectBody(after marker: String, in source: String) -> String? {
         guard let markerRange = source.range(of: marker),
-              let equalsRange = source[markerRange.upperBound...].range(of: "="),
-              let openBrace = source[equalsRange.upperBound...].firstIndex(of: "{")
+              let equalsRange = source[markerRange.upperBound...].range(of: "=")
         else { return nil }
-        return balancedSubstring(from: openBrace, opening: "{", closing: "}", in: source)
+
+        var valueStart = equalsRange.upperBound
+        while valueStart < source.endIndex, source[valueStart].isWhitespace {
+            valueStart = source.index(after: valueStart)
+        }
+        guard valueStart < source.endIndex else { return nil }
+
+        if source[valueStart] == "{" {
+            return balancedSubstring(
+                from: valueStart,
+                opening: "{",
+                closing: "}",
+                in: source
+            )
+        }
+
+        let identifier = source[valueStart...].prefix {
+            $0.isLetter || $0.isNumber || $0 == "_" || $0 == "$"
+        }
+        guard !identifier.isEmpty,
+              let declaration = source.range(
+                  of: #"\b(?:const|let|var)\s+\#(NSRegularExpression.escapedPattern(for: String(identifier)))\s*="#,
+                  options: .regularExpression
+              ),
+              let openBrace = source[declaration.upperBound...].firstIndex(of: "{")
+        else { return nil }
+        return balancedSubstring(
+            from: openBrace,
+            opening: "{",
+            closing: "}",
+            in: source
+        )
     }
 
     private func bracketedValue(
@@ -467,12 +617,36 @@ struct BlockParser {
     ) -> String? {
         var depth = 0
         var inString: Character?
+        var inRegex = false
+        var inRegexCharacterClass = false
+        var inLineComment = false
+        var inBlockComment = false
         var escaped = false
+        var lastSignificantCharacter: Character?
         var index = openIndex
 
         while index < source.endIndex {
             let char = source[index]
+            let nextIndex = source.index(after: index)
+            let nextCharacter = nextIndex < source.endIndex
+                ? source[nextIndex]
+                : nil
             defer { index = source.index(after: index) }
+
+            if inLineComment {
+                if char == "\n" {
+                    inLineComment = false
+                }
+                continue
+            }
+
+            if inBlockComment {
+                if char == "*", nextCharacter == "/" {
+                    inBlockComment = false
+                    index = nextIndex
+                }
+                continue
+            }
 
             if let delimiter = inString {
                 if escaped {
@@ -485,8 +659,32 @@ struct BlockParser {
                 continue
             }
 
+            if inRegex {
+                if escaped {
+                    escaped = false
+                } else if char == "\\" {
+                    escaped = true
+                } else if char == "[" {
+                    inRegexCharacterClass = true
+                } else if char == "]" {
+                    inRegexCharacterClass = false
+                } else if char == "/", !inRegexCharacterClass {
+                    inRegex = false
+                    lastSignificantCharacter = "/"
+                }
+                continue
+            }
+
             if char == "\"" || char == "'" || char == "`" {
                 inString = char
+            } else if char == "/", nextCharacter == "/" {
+                inLineComment = true
+                index = nextIndex
+            } else if char == "/", nextCharacter == "*" {
+                inBlockComment = true
+                index = nextIndex
+            } else if char == "/", canStartRegex(after: lastSignificantCharacter) {
+                inRegex = true
             } else if char == opening {
                 depth += 1
             } else if char == closing {
@@ -495,8 +693,17 @@ struct BlockParser {
                     return String(source[openIndex...index])
                 }
             }
+
+            if !char.isWhitespace {
+                lastSignificantCharacter = char
+            }
         }
         return nil
+    }
+
+    private func canStartRegex(after character: Character?) -> Bool {
+        guard let character else { return true }
+        return "([{,:;=!?&|+-*%^~<>".contains(character)
     }
 
     private func topLevelObjects(in source: String) -> [String] {

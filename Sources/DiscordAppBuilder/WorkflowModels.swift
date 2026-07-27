@@ -256,6 +256,9 @@ struct BlockDefinition: Identifiable, Codable, Hashable, Sendable {
 }
 
 struct WorkflowBlock: Identifiable, Codable, Hashable {
+    static let minimumEditorWidth: CGFloat = 220
+    static let minimumEditorHeight: CGFloat = 140
+
     var id = UUID()
     var runtimeBlockID: String? = nil
     var definition: BlockDefinition

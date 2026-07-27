@@ -87,6 +87,9 @@ struct ProjectStoreTests {
         #expect(botRuntime.contains("rootConfig: rootConfigPath"))
         #expect(botRuntime.contains("this.DiscordJS = {"))
         #expect(botRuntime.contains("await ready"))
+        #expect(botRuntime.contains("DiscordJSModule.Events?.ClientReady"))
+        #expect(botRuntime.contains("configureClientListenerCapacity()"))
+        #expect(!botRuntime.contains("this.client.once('ready'"))
         #expect(botRuntime.contains("workspaces: groups"))
         #expect(botRuntime.contains("ConvertRegex(value, flags)"))
         #expect(botRuntime.contains("module.exports = { BotRuntime }"))
@@ -494,6 +497,142 @@ struct ProjectStoreTests {
         #expect(secondLog.contains("test error 2"))
     }
 
+    @Test func runtimeUsesClientReadyAndAllowsIntentionalBlockListeners() throws {
+        let projectURL = FileManager.default.temporaryDirectory
+            .appending(path: "DiscordAppBuilderEvents-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: projectURL) }
+
+        _ = try ProjectStore.createProject(at: projectURL)
+        try Data("discord.bot.token".utf8).write(
+            to: projectURL.appending(path: "data/token.txt"),
+            options: .atomic
+        )
+
+        let moduleDirectory = projectURL.appending(
+            path: "node_modules/discord.js",
+            directoryHint: .isDirectory
+        )
+        try FileManager.default.createDirectory(
+            at: moduleDirectory,
+            withIntermediateDirectories: true
+        )
+        let fakeDiscordModule = #"""
+        const { EventEmitter } = require('events')
+        const Events = { ClientReady: 'clientReady' }
+        class Client extends EventEmitter {
+          constructor() {
+            super()
+            this.user = { tag: 'Runtime Test' }
+            this.ready = false
+          }
+          isReady() {
+            return this.ready
+          }
+          async login() {
+            this.ready = true
+            queueMicrotask(() => this.emit(Events.ClientReady))
+            return 'token'
+          }
+        }
+        module.exports = {
+          Client,
+          Events,
+          GatewayIntentBits: { Guilds: 1 },
+          Partials: { Channel: 1 }
+        }
+        """#
+        try Data(fakeDiscordModule.utf8).write(
+            to: moduleDirectory.appending(path: "index.js"),
+            options: .atomic
+        )
+
+        let listenerBlock = #"""
+        module.exports = {
+          name: 'Listener Probe',
+          auto_execute: false,
+          inputs: [],
+          options: [],
+          outputs: [],
+          init() {
+            for (let index = 0; index < 12; index += 1) {
+              this.client.on('interactionCreate', () => {})
+            }
+            this.client.on('ready', () => {})
+          },
+          code() {}
+        }
+        """#
+        try Data(listenerBlock.utf8).write(
+            to: projectURL.appending(path: "blocks/listener_probe.js"),
+            options: .atomic
+        )
+
+        let process = Process()
+        let standardError = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.currentDirectoryURL = projectURL
+        process.standardError = standardError
+        process.arguments = [
+            "node",
+            "--trace-warnings",
+            "-e",
+            #"""
+            ;(async () => {
+              const { EventEmitter } = require('events')
+              const { BotRuntime } = require(process.argv[1])
+              const { Client } = require('discord.js')
+              const warnings = []
+              process.on('warning', warning => warnings.push(warning))
+              const groups = [{
+                id: 'group',
+                info: { title: 'Group' },
+                workspaces: [{
+                  id: 'workspace',
+                  active: true,
+                  info: { title: 'Workspace' },
+                  blocks: [{
+                    name: 'listener_probe',
+                    active: true,
+                    inputs: {},
+                    options: {},
+                    outputs: {}
+                  }]
+                }]
+              }]
+              const client = new Client()
+              const runtime = new BotRuntime(client, groups)
+              await runtime.start()
+              await new Promise(resolve => setImmediate(resolve))
+
+              if (warnings.length) process.exit(2)
+              if (client.getMaxListeners() < 25) process.exit(3)
+              if (client.listenerCount('interactionCreate') !== 12) process.exit(4)
+              const legacyReadyCount = EventEmitter.prototype.listenerCount.call(
+                client,
+                'ready'
+              )
+              const clientReadyCount = EventEmitter.prototype.listenerCount.call(
+                client,
+                'clientReady'
+              )
+              if (legacyReadyCount !== 0 || clientReadyCount !== 1) process.exit(5)
+            })().catch(() => process.exit(6))
+            """#,
+            projectURL.appending(path: "bot.js").path
+        ]
+        try process.run()
+        process.waitUntilExit()
+
+        let warnings = String(
+            decoding: standardError.fileHandleForReading.readDataToEndOfFile(),
+            as: UTF8.self
+        )
+        #expect(process.terminationStatus == 0)
+        #expect(!warnings.contains("DeprecationWarning"))
+        #expect(!warnings.contains("MaxListenersExceededWarning"))
+        try? FileManager.default.removeItem(at: projectURL.appending(path: "log"))
+    }
+
     @Test func importsCompleteWorkspacesFileIntoProject() throws {
         let projectURL = FileManager.default.temporaryDirectory
             .appending(path: "DiscordAppBuilderImport-\(UUID().uuidString)", directoryHint: .isDirectory)
@@ -567,6 +706,90 @@ struct ProjectStoreTests {
         #expect(savedCategory.info.title == "Staff Tools")
         #expect(savedCategory.info.collapsed)
         #expect(savedCategory.workspaces.map(\.info.title) == ["staff-audit"])
+    }
+
+    @Test func movesDisablesCopiesAndDeletesCompleteWorkspaces() throws {
+        let projectURL = FileManager.default.temporaryDirectory
+            .appending(path: "DiscordAppBuilderWorkspaceOps-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: projectURL) }
+
+        var store = try ProjectStore.createProject(at: projectURL)
+        let originalGroupID = try #require(store.groups.first?.id)
+        let workspaceID = try #require(store.workspaceReferences.first?.workspaceID)
+        let destination = store.addCategory(named: "Automation")
+        let textDefinition = try BlockParser().parseFile(
+            projectURL.appending(path: "blocks/text.js")
+        )
+        let logDefinition = try BlockParser().parseFile(
+            projectURL.appending(path: "blocks/console_log.js")
+        )
+        let textBlock = WorkflowBlock(
+            runtimeBlockID: "\(workspaceID):4",
+            definition: textDefinition,
+            position: CGPoint(x: 120, y: 100),
+            optionValues: ["text": .string("Preserved setting")],
+            inputWireValues: [:],
+            blockFileName: "text"
+        )
+        let logBlock = WorkflowBlock(
+            runtimeBlockID: "\(workspaceID):5",
+            definition: logDefinition,
+            position: CGPoint(x: 420, y: 100),
+            optionValues: [:],
+            inputWireValues: ["value": .string("workspace-wire")],
+            blockFileName: "console_log"
+        )
+        let connection = WorkflowConnection(
+            wireID: "workspace-wire",
+            fromBlockID: textBlock.id,
+            fromPortID: "text",
+            toBlockID: logBlock.id,
+            toPortID: "value"
+        )
+        try store.update(
+            document: WorkflowDocument(
+                name: "Automation Source",
+                blocks: [textBlock, logBlock],
+                connections: [connection]
+            ),
+            workspaceID: workspaceID
+        )
+
+        try store.moveWorkspace(workspaceID, to: destination.id)
+        try store.setWorkspace(workspaceID, active: false)
+        let source = try #require(store.workspace(withID: workspaceID))
+        let copyReference = try store.insertWorkspaceCopy(
+            source,
+            into: originalGroupID
+        )
+        try store.save()
+
+        let reopened = try ProjectStore.openProject(at: projectURL)
+        #expect(reopened.groupID(containing: workspaceID) == destination.id)
+        #expect(reopened.workspace(withID: workspaceID)?.active == false)
+
+        let copied = try #require(
+            reopened.workspace(withID: copyReference.workspaceID)
+        )
+        #expect(copied.id != workspaceID)
+        #expect(copied.active == false)
+        #expect(copied.info.title == "Automation Source Copy")
+        #expect(copied.blocks.count == 2)
+        #expect(copied.blocks[0].options["text"] == .string("Preserved setting"))
+        #expect(
+            copied.blocks.allSatisfy {
+                $0.blockID?.hasPrefix("\(copied.id):") == true
+            }
+        )
+        #expect(copied.blocks[0].outputs["text"]?.wireIDs == ["workspace-wire"])
+        #expect(copied.blocks[1].inputs["value"]?.wireIDs == ["workspace-wire"])
+
+        var deleting = reopened
+        _ = try deleting.deleteWorkspace(workspaceID)
+        try deleting.save()
+        let afterDelete = try ProjectStore.openProject(at: projectURL)
+        #expect(afterDelete.workspace(withID: workspaceID) == nil)
+        #expect(afterDelete.workspace(withID: copied.id) != nil)
     }
 
     @Test func renamesBlockFileAcrossEveryWorkspace() throws {
@@ -766,6 +989,55 @@ struct ProjectStoreTests {
         #expect(groups.count == 1)
         #expect(groups[0].workspaces.count == 1)
         #expect(groups[0].workspaces[0].info.title == "Imported")
+    }
+
+    @Test func persistsResizedBlockDimensions() throws {
+        let projectURL = FileManager.default.temporaryDirectory.appending(
+            path: "DiscordAppBuilderResize-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        defer { try? FileManager.default.removeItem(at: projectURL) }
+
+        var store = try ProjectStore.createProject(at: projectURL)
+        let workspaceID = try #require(
+            store.workspaceReferences.first?.workspaceID
+        )
+        let definition = BlockDefinition(
+            name: "Resizable",
+            description: "",
+            category: "Tests",
+            autoExecute: false,
+            inputs: [],
+            options: [],
+            outputs: [],
+            sourceFile: "resizable.js"
+        )
+        let block = WorkflowBlock(
+            definition: definition,
+            position: CGPoint(x: 640, y: 480),
+            blockFileName: "resizable",
+            width: 620,
+            height: 440
+        )
+        try store.save(
+            document: WorkflowDocument(
+                name: "Main Workspace",
+                blocks: [block]
+            ),
+            workspaceID: workspaceID
+        )
+
+        let reopened = try ProjectStore.openProject(at: projectURL)
+        let restored = try #require(
+            reopened.document(
+                for: workspaceID,
+                library: [definition]
+            ).blocks.first
+        )
+
+        #expect(restored.width == 620)
+        #expect(restored.height == 440)
+        #expect(restored.position == CGPoint(x: 640, y: 480))
     }
 
     @Test func importsRealPALWorkspaceGraphWhenReferenceCheckoutExists() throws {

@@ -84,6 +84,7 @@ enum ProjectStoreError: Error, LocalizedError {
     case missingWorkspaceFile
     case invalidWorkspaceFile
     case workspaceNotFound
+    case categoryNotFound
     case invalidBlockFilename
     case missingBlockFile(String)
     case blockFileAlreadyExists(String)
@@ -98,6 +99,8 @@ enum ProjectStoreError: Error, LocalizedError {
             "The workspace JSON is not in a supported format."
         case .workspaceNotFound:
             "The selected workspace could not be found."
+        case .categoryNotFound:
+            "The selected category could not be found."
         case .invalidBlockFilename:
             "Use a filename containing only letters, numbers, underscores, or hyphens."
         case .missingBlockFile(let filename):
@@ -227,8 +230,21 @@ struct ProjectStore {
             throw ProjectStoreError.workspaceNotFound
         }
 
+        let definitionsByFileName = Dictionary(
+            library.compactMap { definition -> (String, BlockDefinition)? in
+                guard let sourceFile = definition.sourceFile else { return nil }
+                let fileName = URL(fileURLWithPath: sourceFile)
+                    .deletingPathExtension()
+                    .lastPathComponent
+                return (fileName, definition)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
         let blocks: [WorkflowBlock] = workspace.blocks.enumerated().map { index, stored in
-            let definition = definition(for: stored, library: library)
+            let definition = definition(
+                for: stored,
+                definitionsByFileName: definitionsByFileName
+            )
             let width = CGFloat(stored.width)
             let height = CGFloat(stored.height)
             return WorkflowBlock(
@@ -338,6 +354,115 @@ struct ProjectStore {
         }
     }
 
+    func workspace(withID workspaceID: String) -> ProjectWorkspace? {
+        groups.lazy
+            .flatMap(\.workspaces)
+            .first(where: { $0.id == workspaceID })
+    }
+
+    func groupID(containing workspaceID: String) -> String? {
+        groups.first(where: {
+            $0.workspaces.contains(where: { $0.id == workspaceID })
+        })?.id
+    }
+
+    mutating func moveWorkspace(_ workspaceID: String, to groupID: String) throws {
+        guard let destinationIndex = groups.firstIndex(where: { $0.id == groupID }) else {
+            throw ProjectStoreError.categoryNotFound
+        }
+        guard let sourceIndex = groups.firstIndex(where: { group in
+            group.workspaces.contains(where: { $0.id == workspaceID })
+        }), let workspaceIndex = groups[sourceIndex].workspaces.firstIndex(where: {
+            $0.id == workspaceID
+        }) else {
+            throw ProjectStoreError.workspaceNotFound
+        }
+        guard sourceIndex != destinationIndex else { return }
+
+        let workspace = groups[sourceIndex].workspaces.remove(at: workspaceIndex)
+        groups[destinationIndex].workspaces.append(workspace)
+    }
+
+    mutating func setWorkspace(_ workspaceID: String, active: Bool) throws {
+        for groupIndex in groups.indices {
+            guard let workspaceIndex = groups[groupIndex].workspaces.firstIndex(where: {
+                $0.id == workspaceID
+            }) else { continue }
+            groups[groupIndex].workspaces[workspaceIndex].active = active
+            return
+        }
+        throw ProjectStoreError.workspaceNotFound
+    }
+
+    @discardableResult
+    mutating func deleteWorkspace(_ workspaceID: String) throws -> ProjectWorkspace {
+        for groupIndex in groups.indices {
+            guard let workspaceIndex = groups[groupIndex].workspaces.firstIndex(where: {
+                $0.id == workspaceID
+            }) else { continue }
+            return groups[groupIndex].workspaces.remove(at: workspaceIndex)
+        }
+        throw ProjectStoreError.workspaceNotFound
+    }
+
+    @discardableResult
+    mutating func insertWorkspaceCopy(
+        _ source: ProjectWorkspace,
+        into groupID: String
+    ) throws -> WorkspaceReference {
+        guard let groupIndex = groups.firstIndex(where: { $0.id == groupID }) else {
+            throw ProjectStoreError.categoryNotFound
+        }
+
+        let workspaceID = ProjectIdentifier.make()
+        var copy = source
+        copy.id = workspaceID
+        copy.info.title = availableCopyTitle(
+            for: source.info.title,
+            in: groups[groupIndex]
+        )
+        for index in copy.blocks.indices {
+            let existingID = copy.blocks[index].blockID ?? copy.blocks[index].id
+            let suffix: String
+            if let existingID,
+               let separator = existingID.firstIndex(of: ":") {
+                suffix = String(existingID[existingID.index(after: separator)...])
+            } else {
+                suffix = String(index)
+            }
+            let copiedID = "\(workspaceID):\(suffix)"
+            copy.blocks[index].blockID = copiedID
+            if copy.blocks[index].id != nil {
+                copy.blocks[index].id = copiedID
+            }
+        }
+        groups[groupIndex].workspaces.append(copy)
+
+        return WorkspaceReference(
+            groupID: groupID,
+            workspaceID: workspaceID,
+            groupTitle: groups[groupIndex].info.title,
+            title: copy.info.title
+        )
+    }
+
+    private func availableCopyTitle(
+        for title: String,
+        in group: WorkspaceGroup
+    ) -> String {
+        let existingTitles = Set(group.workspaces.map { $0.info.title.lowercased() })
+        let base = "\(title) Copy"
+        if !existingTitles.contains(base.lowercased()) {
+            return base
+        }
+
+        var sequence = 2
+        while existingTitles.contains("\(base) \(sequence)".lowercased()) {
+            sequence += 1
+        }
+        return "\(base) \(sequence)"
+    }
+
     @discardableResult
     mutating func renameBlockFile(from oldFilename: String, to newFilename: String) throws -> String {
         let oldName = try normalizedBlockFilename(oldFilename)
@@ -441,19 +566,17 @@ struct ProjectStore {
 
     private func definition(
         for stored: StoredBlock,
-        library: [BlockDefinition]
+        definitionsByFileName: [String: BlockDefinition]
     ) -> BlockDefinition {
-        if let definition = library.first(where: {
-            guard let sourceFile = $0.sourceFile else { return false }
-            return URL(fileURLWithPath: sourceFile).deletingPathExtension().lastPathComponent == stored.name
-        }) {
+        if let definition = definitionsByFileName[stored.name] {
             let sourceURL = projectURL
                 .appending(path: "blocks", directoryHint: .isDirectory)
                 .appending(path: definition.sourceFile ?? "\(stored.name).js")
-            return (try? BlockParser().parseFile(
-                sourceURL,
+            return BlockParser().configuredDefinition(
+                from: definition,
+                at: sourceURL,
                 optionValues: stored.options
-            )) ?? definition
+            )
         }
 
         let inputs = stored.inputs.keys.sorted().map {

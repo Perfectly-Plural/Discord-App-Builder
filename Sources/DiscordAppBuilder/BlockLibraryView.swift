@@ -66,6 +66,7 @@ struct WorkspaceSidebarView: View {
 private struct WorkspaceCategory: View {
     @EnvironmentObject private var state: AppState
     let group: WorkspaceGroup
+    @State private var isDropTargeted = false
 
     var body: some View {
         DisclosureGroup(isExpanded: expandedBinding) {
@@ -73,6 +74,7 @@ private struct WorkspaceCategory: View {
                 ForEach(group.workspaces) { workspace in
                     WorkspaceChannelRow(
                         workspace: workspace,
+                        groupID: group.id,
                         isSelected: state.currentWorkspaceID == workspace.id
                     )
                 }
@@ -109,12 +111,41 @@ private struct WorkspaceCategory: View {
             }
         }
         .contextMenu {
-            Button("Add Workspace") {
+            Button {
                 state.addWorkspace(to: group.id)
+            } label: {
+                Label("Add Workspace", systemImage: "plus")
             }
-            Button("Rename Category...") {
+
+            Button {
+                state.pasteWorkspace(into: group.id)
+            } label: {
+                Label("Paste Workspace", systemImage: "doc.on.clipboard")
+            }
+            .disabled(!state.canPasteWorkspace)
+
+            Divider()
+
+            Button {
                 state.renameCategory(group.id)
+            } label: {
+                Label("Rename Category...", systemImage: "pencil")
             }
+        }
+        .background(
+            isDropTargeted ? Color.accentColor.opacity(0.12) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 5)
+        )
+        .dropDestination(for: String.self) { workspaceIDs, _ in
+            guard let workspaceID = workspaceIDs.first,
+                  state.workspaceReferences.contains(where: {
+                      $0.workspaceID == workspaceID
+                  })
+            else { return false }
+            state.moveWorkspace(workspaceID, to: group.id)
+            return true
+        } isTargeted: {
+            isDropTargeted = $0
         }
     }
 
@@ -129,6 +160,7 @@ private struct WorkspaceCategory: View {
 private struct WorkspaceChannelRow: View {
     @EnvironmentObject private var state: AppState
     let workspace: ProjectWorkspace
+    let groupID: String
     let isSelected: Bool
 
     var body: some View {
@@ -161,9 +193,54 @@ private struct WorkspaceChannelRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .draggable(workspace.id)
         .contextMenu {
-            Button("Rename Workspace...") {
+            Button {
                 state.renameWorkspace(workspace.id)
+            } label: {
+                Label("Rename Workspace...", systemImage: "pencil")
+            }
+
+            Button {
+                state.setWorkspaceActive(workspace.id, active: !workspace.active)
+            } label: {
+                Label(
+                    workspace.active ? "Disable Workspace" : "Enable Workspace",
+                    systemImage: workspace.active ? "pause.circle" : "play.circle"
+                )
+            }
+
+            Menu {
+                ForEach(state.workspaceGroups.filter { $0.id != groupID }) { category in
+                    Button(category.info.title) {
+                        state.moveWorkspace(workspace.id, to: category.id)
+                    }
+                }
+            } label: {
+                Label("Move to Category", systemImage: "folder")
+            }
+            .disabled(state.workspaceGroups.count < 2)
+
+            Divider()
+
+            Button {
+                state.copyWorkspace(workspace.id)
+            } label: {
+                Label("Copy Workspace", systemImage: "doc.on.doc")
+            }
+
+            Button {
+                state.duplicateWorkspace(workspace.id)
+            } label: {
+                Label("Duplicate Workspace", systemImage: "plus.square.on.square")
+            }
+
+            Divider()
+
+            Button(role: .destructive) {
+                state.deleteWorkspace(workspace.id)
+            } label: {
+                Label("Delete Workspace...", systemImage: "trash")
             }
         }
     }
