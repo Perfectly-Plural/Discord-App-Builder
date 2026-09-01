@@ -471,32 +471,20 @@ private struct InlineOptionEditor: View {
                                 ?? value.wrappedValue
                         )
 
-                        Menu {
-                            ForEach(choiceKeys, id: \.self) { key in
-                                Button {
-                                    value.wrappedValue = key
-                                } label: {
-                                    if value.wrappedValue == key {
-                                        Label(
-                                            option.choices[key] ?? key,
-                                            systemImage: "checkmark"
-                                        )
-                                    } else {
-                                        Text(option.choices[key] ?? key)
-                                    }
-                                }
-                            }
-                        } label: {
-                            Color.clear
-                                .frame(maxWidth: .infinity, minHeight: 28)
-                                .contentShape(Rectangle())
+                        ReferencePopUpHitTarget(
+                            entries: referenceMenuEntries,
+                            selectedIDs: [value.wrappedValue],
+                            allowsMultipleSelection: false,
+                            accessibilityLabel: option.name
+                        ) { key in
+                            value.wrappedValue = key
                         }
-                        .menuStyle(.borderlessButton)
-                        .menuIndicator(.hidden)
-                        .frame(maxWidth: .infinity, minHeight: 28)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 28)
                     }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 28)
                     .modifier(ReferenceMenuSurface())
-                    .environment(\.colorScheme, .light)
                 } else {
                     Picker(option.name, selection: value) {
                         ForEach(choiceKeys, id: \.self) { key in
@@ -537,24 +525,21 @@ private struct InlineOptionEditor: View {
                     ZStack {
                         referenceMenuLabel(multiSelectSummary)
 
-                        Menu {
-                            ForEach(choiceKeys, id: \.self) { key in
-                                Toggle(
-                                    option.choices[key] ?? key,
-                                    isOn: multiSelectBinding(for: key)
-                                )
-                            }
-                        } label: {
-                            Color.clear
-                                .frame(maxWidth: .infinity, minHeight: 28)
-                                .contentShape(Rectangle())
+                        ReferencePopUpHitTarget(
+                            entries: referenceMenuEntries,
+                            selectedIDs: Set(multiSelectedIDs),
+                            allowsMultipleSelection: true,
+                            accessibilityLabel: option.name
+                        ) { key in
+                            let selection = multiSelectBinding(for: key)
+                            selection.wrappedValue.toggle()
                         }
-                        .menuStyle(.borderlessButton)
-                        .menuIndicator(.hidden)
-                        .frame(maxWidth: .infinity, minHeight: 28)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 28)
                     }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 28)
                     .modifier(ReferenceMenuSurface())
-                    .environment(\.colorScheme, .light)
                 } else {
                     Menu {
                         ForEach(choiceKeys, id: \.self) { key in
@@ -596,6 +581,19 @@ private struct InlineOptionEditor: View {
         .help(option.description)
     }
 
+    private var referenceMenuEntries: [ReferenceMenuEntry] {
+        choiceKeys.map {
+            ReferenceMenuEntry(id: $0, title: option.choices[$0] ?? $0)
+        }
+    }
+
+    private var multiSelectedIDs: [String] {
+        state.document.blocks
+            .first(where: { $0.id == blockID })?
+            .optionValues[option.id]?
+            .wireIDs ?? []
+    }
+
     private var usesReferencePalette: Bool {
         colorScheme == .dark
     }
@@ -630,7 +628,8 @@ private struct InlineOptionEditor: View {
         }
         .foregroundStyle(Color.black)
         .padding(.horizontal, 8)
-        .frame(maxWidth: .infinity, minHeight: 28)
+        .frame(maxWidth: .infinity)
+        .frame(height: 28)
         .contentShape(Rectangle())
     }
 
@@ -718,10 +717,79 @@ private struct InlineOptionEditor: View {
     }
 }
 
+private struct ReferenceMenuEntry: Equatable {
+    let id: String
+    let title: String
+}
+
+private struct ReferencePopUpHitTarget: NSViewRepresentable {
+    let entries: [ReferenceMenuEntry]
+    let selectedIDs: Set<String>
+    let allowsMultipleSelection: Bool
+    let accessibilityLabel: String
+    let onSelect: (String) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onSelect: onSelect)
+    }
+
+    func makeNSView(context: Context) -> NSPopUpButton {
+        let button = NSPopUpButton(frame: .zero, pullsDown: false)
+        button.isBordered = false
+        button.focusRingType = .none
+        button.alphaValue = 0.01
+        button.setContentHuggingPriority(.required, for: .vertical)
+        button.setContentCompressionResistancePriority(.required, for: .vertical)
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.didSelect(_:))
+        return button
+    }
+
+    func updateNSView(
+        _ button: NSPopUpButton,
+        context: Context
+    ) {
+        context.coordinator.onSelect = onSelect
+        button.removeAllItems()
+        for entry in entries {
+            button.addItem(withTitle: entry.title)
+            button.lastItem?.representedObject = entry.id
+        }
+        button.menu?.appearance = NSAppearance(named: .aqua)
+        for item in button.itemArray {
+            guard let id = item.representedObject as? String else { continue }
+            item.state = selectedIDs.contains(id) ? .on : .off
+        }
+        if !allowsMultipleSelection,
+           let selectedIndex = entries.firstIndex(where: {
+               selectedIDs.contains($0.id)
+           }) {
+            button.selectItem(at: selectedIndex)
+        }
+        button.setAccessibilityLabel(accessibilityLabel)
+    }
+
+    final class Coordinator: NSObject {
+        var onSelect: (String) -> Void
+
+        init(onSelect: @escaping (String) -> Void) {
+            self.onSelect = onSelect
+        }
+
+        @MainActor @objc func didSelect(_ sender: NSPopUpButton) {
+            guard let id = sender.selectedItem?.representedObject as? String else {
+                return
+            }
+            onSelect(id)
+        }
+    }
+}
+
 private struct ReferenceMenuSurface: ViewModifier {
     func body(content: Content) -> some View {
         content
-            .frame(maxWidth: .infinity, minHeight: 28)
+            .frame(maxWidth: .infinity)
+            .frame(height: 28)
             .background(
                 Color(red: 243 / 255, green: 243 / 255, blue: 243 / 255),
                 in: RoundedRectangle(cornerRadius: 5)

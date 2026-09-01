@@ -1,0 +1,67 @@
+name: Build Windows Release
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-upload:
+    name: Build and upload Windows installers
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    defaults:
+      run:
+        working-directory: Windows
+
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: Windows/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Verify Windows application
+        run: |
+          npm run typecheck
+          npm test
+
+      - name: Build Windows installers
+        run: npm run build
+
+      - name: Verify installer artifacts
+        shell: pwsh
+        run: |
+          $artifacts = Get-ChildItem dist -Filter "Discord-App-Builder-Windows-Setup-*.exe"
+          if ($artifacts.Count -ne 2) {
+            throw "Expected x64 and arm64 Windows installers, found $($artifacts.Count)."
+          }
+          $artifacts | ForEach-Object {
+            if ($_.Length -lt 10MB) { throw "$($_.Name) is unexpectedly small." }
+          }
+
+      - name: Upload installers to release
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            Windows/dist/Discord-App-Builder-Windows-Setup-*.exe \
+            --clobber

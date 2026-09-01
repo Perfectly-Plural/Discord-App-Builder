@@ -1,7 +1,7 @@
 # Discord App Builder
 
-A native macOS visual workflow editor for building Discord bots with
-compatible block and workspace formats.
+A visual workflow editor for building Discord bots with compatible block and
+workspace formats. Desktop editions are included for macOS, Windows, and Linux.
 
 ## Features
 
@@ -32,8 +32,8 @@ compatible block and workspace formats.
   settings and links between copied blocks.
 - Select and delete individual links, or delete one or more selected blocks.
 - Choose System, Light, or Dark appearance for the entire editor.
-- Persist appearance and recent projects in
-  `~/Library/Application Support/Discord App Builder/settings.json`.
+- Persist appearance and recent projects in the operating system's standard
+  per-user application settings folder.
 - Work with all workspace groups and workspaces in an imported bot.
 - Run generated projects with the included compatible Node.js runtime.
 - Update an existing project's `bot.js` from the newest runtime bundled with
@@ -125,6 +125,39 @@ dist/Discord App Builder.app
 Published GitHub releases automatically build and attach
 `Discord-App-Builder-macOS.zip`. That archive contains only the compiled
 `Discord App Builder.app` bundle.
+
+## Build the Windows App
+
+The Windows edition lives in `Windows/` and uses the same project folders,
+blocks, workspaces, generated runtime, colors, and editor operations.
+
+```powershell
+cd Windows
+npm ci
+npm run typecheck
+npm test
+npm run build
+```
+
+The build produces x64 and ARM64 `.exe` installers in `Windows/dist/`. GitHub
+releases build and attach both installers automatically.
+
+## Build the Linux App
+
+Linux uses the same shared Electron source under `Windows/`; there is no forked
+editor or project format to fall out of sync.
+
+```sh
+cd Windows
+npm ci
+npm run typecheck
+npm test
+npm run build:linux
+```
+
+The build produces x64 and ARM64 AppImages and Debian packages in
+`Windows/dist/`. Published GitHub releases build and attach all four packages
+automatically.
 
 ## Test
 

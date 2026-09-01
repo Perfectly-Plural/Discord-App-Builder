@@ -619,15 +619,36 @@ private struct ConnectionLayer: View {
             ForEach(state.document.connections) { connection in
                 if let path = path(for: connection) {
                     let isSelected = state.selectedConnectionID == connection.id
+                    let hitPath = path.strokedPath(
+                        StrokeStyle(
+                            lineWidth: 18,
+                            lineCap: .round,
+                            lineJoin: .round
+                        )
+                    )
+
+                    if isSelected {
+                        path
+                            .stroke(
+                                Color.primary.opacity(0.9),
+                                style: StrokeStyle(lineWidth: 7, lineCap: .round)
+                            )
+                    }
+
                     path
                         .stroke(
                             color(for: connection).opacity(isSelected ? 1 : 0.82),
-                            lineWidth: isSelected ? 5 : 3
+                            style: StrokeStyle(
+                                lineWidth: isSelected ? 4 : 3,
+                                lineCap: .round
+                            )
                         )
 
-                    path
-                        .stroke(Color.primary.opacity(0.001), lineWidth: 16)
+                    hitPath
+                        .fill(Color.primary.opacity(0.001))
+                        .contentShape(hitPath)
                         .onTapGesture {
+                            NSApp.keyWindow?.makeFirstResponder(nil)
                             state.selectConnection(connection.id)
                         }
                         .help("Click to select this link, then press Delete")
