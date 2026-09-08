@@ -2,7 +2,7 @@ import { memo, type ChangeEvent } from "react";
 import { Handle, NodeResizer, Position, type Node, type NodeProps } from "@xyflow/react";
 import { Box, Bolt, Grip, LockKeyhole } from "lucide-react";
 import type { BlockOption, BlockPort, WorkflowBlock } from "./types";
-import { resolvedType, valueColors } from "./editor-model";
+import { minimumBlockHeight, resolvedType, valueColors } from "./editor-model";
 
 export interface WorkflowBlockNodeData extends Record<string, unknown> {
   block: WorkflowBlock;
@@ -156,6 +156,16 @@ function WorkflowBlockNodeView({ data, selected }: NodeProps<WorkflowNode>) {
   const displayedID = block.runtimeBlockID?.startsWith(`${workspaceID}:`)
     ? block.runtimeBlockID.slice(workspaceID.length + 1)
     : block.runtimeBlockID;
+  const hasInputs = block.definition.inputs.length > 0;
+  const hasOptions = block.definition.options.length > 0;
+  const hasOutputs = block.definition.outputs.length > 0;
+  const minHeight = minimumBlockHeight(block, connectionCounts);
+  const bodyClasses = [
+    "block-body",
+    hasInputs && "has-inputs",
+    hasOptions && "has-options",
+    hasOutputs && "has-outputs"
+  ].filter(Boolean).join(" ");
 
   return (
     <div
@@ -171,11 +181,14 @@ function WorkflowBlockNodeView({ data, selected }: NodeProps<WorkflowNode>) {
       <NodeResizer
         isVisible={selected && !block.isLocked}
         minWidth={220}
-        minHeight={140}
+        minHeight={minHeight}
         lineClassName="resize-line"
         handleClassName="resize-handle"
       />
-      <div className="block-header" onDoubleClick={() => onRename(block)}>
+      <div
+        className={`block-header ${block.definition.autoExecute ? "auto-execute" : ""}`}
+        onDoubleClick={() => onRename(block)}
+      >
         {block.definition.autoExecute ? <Bolt size={15} /> : <Box size={15} />}
         <strong>{block.definition.name}</strong>
         <span className="block-category">[{block.definition.category}]</span>
@@ -183,27 +196,33 @@ function WorkflowBlockNodeView({ data, selected }: NodeProps<WorkflowNode>) {
         {block.isLocked && <LockKeyhole size={13} />}
         {displayedID && <code>#{displayedID}</code>}
       </div>
-      <div className="block-body">
-        <PortRows
-          block={block}
-          ports={block.definition.inputs}
-          direction="input"
-          counts={connectionCounts}
-        />
-        <div className="option-column">
-          {block.definition.options.map((option) => (
-            <label className="option-field" key={option.id} htmlFor={`${block.id}-${option.id}`}>
-              <span>{option.name}</span>
-              {optionEditor(block, option, onOptionChange)}
-            </label>
-          ))}
-        </div>
-        <PortRows
-          block={block}
-          ports={block.definition.outputs}
-          direction="output"
-          counts={connectionCounts}
-        />
+      <div className={bodyClasses}>
+        {hasInputs && (
+          <PortRows
+            block={block}
+            ports={block.definition.inputs}
+            direction="input"
+            counts={connectionCounts}
+          />
+        )}
+        {hasOptions && (
+          <div className="option-column">
+            {block.definition.options.map((option) => (
+              <label className="option-field" key={option.id} htmlFor={`${block.id}-${option.id}`}>
+                <span>{option.name}</span>
+                {optionEditor(block, option, onOptionChange)}
+              </label>
+            ))}
+          </div>
+        )}
+        {hasOutputs && (
+          <PortRows
+            block={block}
+            ports={block.definition.outputs}
+            direction="output"
+            counts={connectionCounts}
+          />
+        )}
       </div>
     </div>
   );

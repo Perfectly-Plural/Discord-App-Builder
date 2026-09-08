@@ -1,6 +1,6 @@
 {
   "name": "discord-app-builder-desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Cross-platform desktop edition of Discord App Builder",
@@ -10,16 +10,22 @@
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "concurrently -k \"vite\" \"wait-on tcp:5173 && electron .\"",
-    "generate:templates": "node scripts/generate-templates.cjs",
     "build:renderer": "vite build",
     "package:windows:x64": "electron-builder --win nsis --x64",
     "package:windows:arm64": "electron-builder --win nsis --arm64",
-    "build:windows": "npm run build:renderer && npm run generate:templates && npm run package:windows:x64 && npm run package:windows:arm64",
+    "package:windows:zip:x64": "electron-builder --win zip --x64",
+    "package:windows:zip:arm64": "electron-builder --win zip --arm64",
+    "build:windows": "npm run build:renderer && npm run package:windows:x64 && npm run package:windows:arm64",
     "package:linux:x64": "electron-builder --linux AppImage deb --x64",
     "package:linux:arm64": "electron-builder --linux AppImage deb --arm64",
-    "build:linux": "npm run build:renderer && npm run generate:templates && npm run package:linux:x64 && npm run package:linux:arm64",
+    "package:linux:release:x64": "electron-builder --linux deb rpm zip --x64",
+    "package:linux:release:arm64": "electron-builder --linux deb rpm zip --arm64",
+    "package:linux:flatpak:x64": "electron-builder --linux flatpak --x64",
+    "package:linux:flatpak:arm64": "electron-builder --linux flatpak --arm64",
+    "package:linux:flatpak": "npm run package:linux:flatpak:x64 && npm run package:linux:flatpak:arm64",
+    "build:linux": "npm run build:renderer && npm run package:linux:x64 && npm run package:linux:arm64 && npm run package:linux:flatpak",
     "build": "npm run build:windows",
-    "build:dir": "npm run build:renderer && npm run generate:templates && electron-builder --dir",
+    "build:dir": "npm run build:renderer && electron-builder --dir",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
@@ -56,7 +62,7 @@
     ],
     "extraResources": [
       {
-        "from": "generated/templates.json",
+        "from": "../Shared/project-templates.json",
         "to": "templates/templates.json"
       },
       {
@@ -69,9 +75,10 @@
       "target": [
         { "target": "nsis", "arch": ["x64", "arm64"] }
       ],
-      "artifactName": "Discord-App-Builder-Windows-Setup-${arch}-${version}.${ext}"
+      "artifactName": "Discord-App-Builder-Windows-${arch}-${version}.${ext}"
     },
     "nsis": {
+      "artifactName": "Discord-App-Builder-Windows-Setup-${arch}-${version}.${ext}",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
@@ -89,6 +96,11 @@
       "description": "Build Discord bots with a visual block workflow editor.",
       "maintainer": "Perfectly Plural",
       "syncDesktopName": true,
+      "artifactName": "Discord-App-Builder-Linux-${arch}-${version}.${ext}"
+    },
+    "flatpak": {
+      "runtimeVersion": "25.08",
+      "baseVersion": "25.08",
       "artifactName": "Discord-App-Builder-Linux-${arch}-${version}.${ext}"
     }
   }

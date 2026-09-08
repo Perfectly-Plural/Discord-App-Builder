@@ -100,18 +100,141 @@ function createWindow() {
       }
       if (process.env.DAB_CAPTURE_PATH) {
         setTimeout(async () => {
+          const canvasZoomClicks = Math.max(0, Number(process.env.DAB_SMOKE_CANVAS_ZOOM_CLICKS || 0));
+          if (canvasZoomClicks) {
+            await mainWindow.webContents.executeJavaScript(`(async () => {
+              const zoomIn = document.querySelector('.react-flow__controls-zoomin');
+              for (let index = 0; index < ${canvasZoomClicks}; index += 1) {
+                zoomIn?.click();
+                await new Promise(resolve => setTimeout(resolve, 80));
+              }
+            })()`);
+          }
           const image = await mainWindow.webContents.capturePage();
           fs.writeFileSync(process.env.DAB_CAPTURE_PATH, image.toPNG());
           const metrics = await mainWindow.webContents.executeJavaScript(`({
+            home: Boolean(document.querySelector('.home-screen')),
+            recentProjects: document.querySelectorAll('.recent-projects > button').length,
             workspaces: document.querySelectorAll('.workspace-row').length,
             blocks: document.querySelectorAll('.workflow-block').length,
             edges: document.querySelectorAll('.react-flow__edge').length,
+            minimaps: document.querySelectorAll('.react-flow__minimap').length,
             handles: document.querySelectorAll('.react-flow__handle').length,
             edgePaths: document.querySelectorAll('.react-flow__edge-path').length,
             width: document.documentElement.scrollWidth,
             height: document.documentElement.scrollHeight
           })`);
           console.log(`DAB_SMOKE_METRICS ${JSON.stringify(metrics)}`);
+          if (process.env.DAB_SMOKE_GEOMETRY) {
+            const geometry = await mainWindow.webContents.executeJavaScript(`(() => {
+              const body = document.querySelector('.block-body.has-options.has-outputs');
+              const node = body?.closest('.workflow-block')?.getBoundingClientRect();
+              const handle = body?.querySelector('.port-column.output .connector')?.getBoundingClientRect();
+              const portLabel = body?.querySelector('.port-column.output .port-row span')?.getBoundingClientRect();
+              const optionLabel = body?.querySelector('.option-field > span')?.getBoundingClientRect();
+              if (!node || !handle || !portLabel || !optionLabel) return null;
+              const firstEdgePath = document.querySelector('.react-flow__edge-path');
+              const firstSourceHandle = document.querySelector('.connector.source')?.getBoundingClientRect();
+              let edgeStartFromHandleOuter = null;
+              if (firstEdgePath && firstSourceHandle) {
+                const point = firstEdgePath.getPointAtLength(0);
+                const matrix = firstEdgePath.getScreenCTM();
+                if (matrix) {
+                  const screenPoint = new DOMPoint(point.x, point.y).matrixTransform(matrix);
+                  edgeStartFromHandleOuter = [
+                    screenPoint.x - firstSourceHandle.right,
+                    screenPoint.y - (firstSourceHandle.top + firstSourceHandle.height / 2)
+                  ];
+                }
+              }
+              const handles = Array.from(document.querySelectorAll('.connector')).map(element => {
+                const handleRect = element.getBoundingClientRect();
+                const nodeRect = element.closest('.workflow-block')?.getBoundingClientRect();
+                const output = element.classList.contains('source');
+                const outerX = output ? handleRect.right - 1 : handleRect.left + 1;
+                const hit = document.elementFromPoint(outerX, handleRect.top + handleRect.height / 2);
+                return {
+                  direction: output ? 'output' : 'input',
+                  boundaryOffset: nodeRect
+                    ? (output
+                      ? handleRect.left + handleRect.width / 2 - nodeRect.right
+                      : handleRect.left + handleRect.width / 2 - nodeRect.left)
+                    : null,
+                  outerEdgeOffset: nodeRect
+                    ? (output ? handleRect.right - nodeRect.right : handleRect.left - nodeRect.left)
+                    : null,
+                  visibleAtOuterEdge: hit === element
+                };
+              });
+              const handleCenters = Array.from(document.querySelectorAll('.connector')).map(element => {
+                const bounds = element.getBoundingClientRect();
+                return [bounds.left + bounds.width / 2, bounds.top + bounds.height / 2];
+              });
+              const edgeEndpointDistances = Array.from(document.querySelectorAll('.react-flow__edge-path')).flatMap(path => {
+                const matrix = path.getScreenCTM();
+                if (!matrix || handleCenters.length === 0) return [];
+                const endpoints = [path.getPointAtLength(0), path.getPointAtLength(path.getTotalLength())];
+                return endpoints.map(point => {
+                  const screenPoint = new DOMPoint(point.x, point.y).matrixTransform(matrix);
+                  return Math.min(...handleCenters.map(([x, y]) => Math.hypot(screenPoint.x - x, screenPoint.y - y)));
+                });
+              });
+              return {
+                handleSize: [handle.width, handle.height],
+                handleCenterFromNodeRight: handle.left + handle.width / 2 - node.right,
+                labelCenterOffset: portLabel.top + portLabel.height / 2 - optionLabel.top - optionLabel.height / 2,
+                edgeStartFromHandleOuter,
+                maxEdgeEndpointDistance: edgeEndpointDistances.length
+                  ? Math.max(...edgeEndpointDistances)
+                  : null,
+                handles
+              };
+            })()`);
+            console.log(`DAB_SMOKE_GEOMETRY ${JSON.stringify(geometry)}`);
+          }
+          if (process.env.DAB_SMOKE_LAYOUT) {
+            const layout = await mainWindow.webContents.executeJavaScript(`(() => {
+              return Array.from(document.querySelectorAll('.workflow-block')).map(block => {
+                const bounds = block.getBoundingClientRect();
+                const descendants = Array.from(block.querySelectorAll('.option-control, .port-row'));
+                const contentBottom = descendants.reduce(
+                  (bottom, element) => Math.max(bottom, element.getBoundingClientRect().bottom),
+                  bounds.top
+                );
+                return {
+                  name: block.querySelector('.block-header strong')?.textContent || '',
+                  blockBottom: bounds.bottom,
+                  contentBottom,
+                  overflowBottom: Math.max(0, contentBottom - bounds.bottom)
+                };
+              }).filter(item => item.overflowBottom > 0.5)
+                .sort((left, right) => right.overflowBottom - left.overflowBottom)
+                .slice(0, 10);
+            })()`);
+            console.log(`DAB_SMOKE_LAYOUT ${JSON.stringify(layout)}`);
+          }
+          if (process.env.DAB_SMOKE_NAVIGATION) {
+            const navigation = await mainWindow.webContents.executeJavaScript(`(async () => {
+              const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+              const activeProject = document.querySelector('.project-orb.active');
+              activeProject?.dispatchEvent(new MouseEvent('contextmenu', {
+                bubbles: true, cancelable: true, clientX: 44, clientY: 145
+              }));
+              await delay(100);
+              const closeButton = Array.from(document.querySelectorAll('.context-menu button'))
+                .find(button => button.textContent?.includes('Close Project'));
+              const closeProjectItem = Boolean(closeButton);
+              closeButton?.click();
+              await delay(300);
+              return {
+                closeProjectItem,
+                homeAfterClose: Boolean(document.querySelector('.home-screen')),
+                workspaceSidebarAfterClose: Boolean(document.querySelector('.workspace-sidebar')),
+                recentProjectsAfterClose: document.querySelectorAll('.recent-projects > button').length
+              };
+            })()`);
+            console.log(`DAB_SMOKE_NAVIGATION ${JSON.stringify(navigation)}`);
+          }
           if (process.env.DAB_SMOKE_INTERACTIONS) {
             const interactionStart = await mainWindow.webContents.executeJavaScript(`(async () => {
               const delay = ms => new Promise(resolve => setTimeout(resolve, ms));

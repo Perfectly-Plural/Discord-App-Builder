@@ -2,20 +2,21 @@ import {
   useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode
 } from "react";
 import {
-  Background, BackgroundVariant, Controls, MiniMap, ReactFlow, ReactFlowProvider,
+  Background, BackgroundVariant, Controls, ReactFlow, ReactFlowProvider,
   applyNodeChanges, type Connection, type EdgeChange, type NodeChange
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
   ChevronDown, ChevronRight, Copy, Download, FilePlus2, FolderOpen,
-  Hash, PackageOpen, Plus, RefreshCw, Save, Search, SunMoon, Trash2, X
+  Hash, Home, PackageOpen, Plus, RefreshCw, Save,
+  Search, SunMoon, Trash2, X
 } from "lucide-react";
 import type {
   AppSettings, Appearance, BlockDefinition, ProjectData, StoredWorkspace,
   WorkflowBlock, WorkflowConnection, WorkflowDocument, WorkspaceGroup
 } from "./types";
 import {
-  accepts, connectBlocks, createBlock, makeID, portFor, removeConnections,
+  accepts, connectBlocks, createBlock, makeID, minimumBlockHeight, portFor, removeConnections,
   resolvedType, valueColors
 } from "./editor-model";
 import { WorkflowBlockNode, type WorkflowNode } from "./WorkflowBlockNode";
@@ -83,6 +84,10 @@ function initials(name: string): string {
   return (parts.length > 1 ? `${parts[0][0]}${parts[1][0]}` : name.slice(0, 2)).toUpperCase();
 }
 
+function projectName(projectPath: string): string {
+  return projectPath.split(/[\\/]/).filter(Boolean).at(-1) || "Project";
+}
+
 function Toolbar({
   hasProject, dirty, appearance, action
 }: {
@@ -107,28 +112,47 @@ function Toolbar({
 }
 
 function ProjectRail({
-  settings, project, openRecent, newProject, openProject
+  settings, project, homeVisible, showHome, openRecent, newProject, openProject,
+  closeProject, showMenu
 }: {
   settings: AppSettings;
   project: ProjectData | null;
+  homeVisible: boolean;
+  showHome: () => void;
   openRecent: (path: string) => void;
   newProject: () => void;
   openProject: () => void;
+  closeProject: () => void;
+  showMenu: (event: React.MouseEvent, items: MenuState["items"]) => void;
 }) {
   return (
     <aside className="project-rail">
       <div className="project-list">
+        <button
+          className={`home-orb ${homeVisible ? "active" : ""}`}
+          title="Home"
+          aria-label="Home"
+          onClick={showHome}
+        >
+          <Home />
+        </button>
+        <span className="project-list-divider" />
         {settings.recentProjects.map((projectPath, index) => {
-          const name = projectPath.split(/[\\/]/).filter(Boolean).at(-1) || "Project";
-          const active = project?.projectPath === projectPath;
+          const name = projectName(projectPath);
+          const active = !homeVisible && project?.projectPath === projectPath;
+          const loaded = project?.projectPath === projectPath;
           return (
             <button
               key={projectPath}
               className={`project-orb color-${index % 7} ${active ? "active" : ""}`}
               title={name}
               onClick={() => openRecent(projectPath)}
+              onContextMenu={(event) => showMenu(event, [
+                { label: "Open Project", icon: <FolderOpen />, action: () => openRecent(projectPath) },
+                ...(loaded ? [{ label: "Close Project", icon: <X />, action: closeProject }] : [])
+              ])}
             >
-              <i />{initials(name)}
+              {initials(name)}
             </button>
           );
         })}
@@ -138,6 +162,76 @@ function ProjectRail({
         <button title="Open Project" onClick={openProject}><FolderOpen /></button>
       </div>
     </aside>
+  );
+}
+
+const recentChanges = [
+  {
+    title: "More reliable block layouts",
+    detail: "Blocks now grow to contain repeatable ports and controls, with inset connectors and correctly attached lines."
+  },
+  {
+    title: "A proper home screen",
+    detail: "The app now starts at Home, where recent projects can be reopened and active projects can be closed."
+  },
+  {
+    title: "Cleaner workflow canvas",
+    detail: "The grid is quieter, the minimap is gone, and node spacing and connection placement are more consistent."
+  }
+];
+
+function HomeScreen({
+  settings, status, newProject, openProject, openRecent
+}: {
+  settings: AppSettings;
+  status: string;
+  newProject: () => void;
+  openProject: () => void;
+  openRecent: (path: string) => void;
+}) {
+  return (
+    <main className="home-screen">
+      <div className="home-content">
+        <header className="home-header">
+          <div>
+            <h1>Discord App Builder</h1>
+            <p>Visual workflow editor for Discord bots</p>
+          </div>
+          <div className="home-actions">
+            <button className="primary" onClick={newProject}><FilePlus2 />New Project</button>
+            <button onClick={openProject}><FolderOpen />Open Project</button>
+          </div>
+        </header>
+
+        <div className="home-grid">
+          <section className="home-panel">
+            <header><h2>Recent Projects</h2></header>
+            <div className="recent-projects">
+              {settings.recentProjects.map((projectPath) => (
+                <button key={projectPath} onClick={() => openRecent(projectPath)}>
+                  <span className="recent-project-icon"><FolderOpen /></span>
+                  <span><strong>{projectName(projectPath)}</strong><small>{projectPath}</small></span>
+                  <ChevronRight />
+                </button>
+              ))}
+              {!settings.recentProjects.length && (
+                <div className="home-empty"><FolderOpen /><strong>No recent projects</strong><span>Your opened projects will appear here.</span></div>
+              )}
+            </div>
+          </section>
+
+          <section className="home-panel changes-panel">
+            <header><h2>Recent Changes</h2><span>Version {__APP_VERSION__}</span></header>
+            <div className="change-list">
+              {recentChanges.map((change) => (
+                <article key={change.title}><strong>{change.title}</strong><p>{change.detail}</p></article>
+              ))}
+            </div>
+          </section>
+        </div>
+        <p className="home-status" role="status">{status}</p>
+      </div>
+    </main>
   );
 }
 
@@ -504,31 +598,36 @@ function WorkflowCanvas({
     return result;
   }, [document.connections]);
 
-  const generatedNodes: WorkflowNode[] = useMemo(() => document.blocks.map((block) => ({
-    id: block.id,
-    type: "workflowBlock",
-    position: block.position,
-    width: block.width,
-    height: block.height,
-    selected: selectedBlocks.has(block.id),
-    dragHandle: ".block-header",
-    zIndex: block.zIndex,
-    data: {
-      block,
-      workspaceID,
-      connectionCounts: counts[block.id] || {},
-      onOptionChange: updateOption,
-      onRename: renameBlock,
-      onDelete: (blockID) => {
-        const selected = selectedBlocks.has(blockID) ? selectedBlocks : new Set([blockID]);
-        updateDocument(workspaceID, (current) => {
-          const withoutLinks = removeConnections(current, (connection) =>
-            selected.has(connection.fromBlockID) || selected.has(connection.toBlockID));
-          return { ...withoutLinks, blocks: withoutLinks.blocks.filter((item) => !selected.has(item.id)) };
-        });
+  const generatedNodes: WorkflowNode[] = useMemo(() => document.blocks.map((block) => {
+    const connectionCounts = counts[block.id] || {};
+    const height = Math.max(block.height, minimumBlockHeight(block, connectionCounts));
+    const displayedBlock = height === block.height ? block : { ...block, height };
+    return {
+      id: block.id,
+      type: "workflowBlock",
+      position: block.position,
+      width: block.width,
+      height,
+      selected: selectedBlocks.has(block.id),
+      dragHandle: ".block-header",
+      zIndex: block.zIndex,
+      data: {
+        block: displayedBlock,
+        workspaceID,
+        connectionCounts,
+        onOptionChange: updateOption,
+        onRename: renameBlock,
+        onDelete: (blockID) => {
+          const selected = selectedBlocks.has(blockID) ? selectedBlocks : new Set([blockID]);
+          updateDocument(workspaceID, (current) => {
+            const withoutLinks = removeConnections(current, (connection) =>
+              selected.has(connection.fromBlockID) || selected.has(connection.toBlockID));
+            return { ...withoutLinks, blocks: withoutLinks.blocks.filter((item) => !selected.has(item.id)) };
+          });
+        }
       }
-    }
-  })), [counts, document.blocks, renameBlock, selectedBlocks, updateDocument, updateOption, workspaceID]);
+    };
+  }), [counts, document.blocks, renameBlock, selectedBlocks, updateDocument, updateOption, workspaceID]);
 
   const [nodes, setNodes] = useState<WorkflowNode[]>(generatedNodes);
   useEffect(() => {
@@ -599,14 +698,17 @@ function WorkflowCanvas({
             next = {
               ...next,
               width: Math.max(220, change.dimensions.width),
-              height: Math.max(140, change.dimensions.height)
+              height: Math.max(
+                minimumBlockHeight(block, counts[block.id] || {}),
+                change.dimensions.height
+              )
             };
           }
         }
         return next;
       })
     }));
-  }, [updateDocument, workspaceID]);
+  }, [counts, updateDocument, workspaceID]);
 
   const onEdgesChange = useCallback((changes: EdgeChange<WorkflowEdgeType>[]) => {
     for (const change of changes) {
@@ -665,9 +767,8 @@ function WorkflowCanvas({
         minZoom={0.15}
         maxZoom={2.5}
       >
-        <Background variant={BackgroundVariant.Lines} gap={24} size={1} />
+        <Background variant={BackgroundVariant.Dots} gap={24} size={1} />
         <Controls showInteractive={false} />
-        <MiniMap nodeStrokeWidth={2} pannable zoomable />
       </ReactFlow>
       {!document.blocks.length && <div className="canvas-empty"><PackageOpen /><strong>Empty workspace</strong></div>}
       {picker && (
@@ -692,6 +793,7 @@ function WorkflowCanvas({
 export default function App() {
   const [settings, setSettings] = useState<AppSettings>({ appearance: "system", recentProjects: [] });
   const [project, setProject] = useState<ProjectData | null>(null);
+  const [homeVisible, setHomeVisible] = useState(true);
   const [activeWorkspaceID, setActiveWorkspaceID] = useState<string | null>(null);
   const [tabs, setTabs] = useState<string[]>([]);
   const [dirty, setDirty] = useState(false);
@@ -730,6 +832,7 @@ export default function App() {
 
   const rememberProject = useCallback((loaded: ProjectData) => {
     setProject(loaded);
+    setHomeVisible(false);
     const first = loaded.groups.flatMap((group) => group.workspaces)[0]?.id || null;
     setActiveWorkspaceID(first);
     setTabs(first ? [first] : []);
@@ -764,18 +867,38 @@ export default function App() {
     if (selected) await openPath(selected);
   }, [openPath]);
 
+  const selectRecentProject = useCallback((projectPath: string) => {
+    if (projectRef.current?.projectPath === projectPath) {
+      setHomeVisible(false);
+      return;
+    }
+    void openPath(projectPath);
+  }, [openPath]);
+
   const save = useCallback(async (silent = false) => {
     const current = projectRef.current;
-    if (!current) return;
+    if (!current) return true;
     try {
       const result = await window.builderAPI.saveProject(current);
       setProject((value) => value ? { ...value, groups: result.groups } : value);
       setDirty(false);
       if (!silent) setStatus(`Saved ${current.projectName}`);
+      return true;
     } catch (error) {
       setStatus(`Save failed: ${(error as Error).message}`);
+      return false;
     }
   }, []);
+
+  const closeProject = useCallback(async () => {
+    if (dirty && !(await save(true))) return;
+    setProject(null);
+    setActiveWorkspaceID(null);
+    setTabs([]);
+    setDirty(false);
+    setStatus("Ready");
+    setHomeVisible(true);
+  }, [dirty, save]);
 
   useEffect(() => {
     if (!dirty) return;
@@ -982,45 +1105,63 @@ export default function App() {
     <div className="app" onDragOver={(event) => event.preventDefault()} onDrop={droppedWorkspace}>
       <Toolbar hasProject={Boolean(project)} dirty={dirty} appearance={settings.appearance} action={action} />
       <div className="app-body">
-        <ProjectRail settings={settings} project={project} openRecent={openPath} newProject={newProject} openProject={openProject} />
-        <WorkspaceSidebar
+        <ProjectRail
+          settings={settings}
           project={project}
-          activeWorkspaceID={activeWorkspaceID}
-          selectWorkspace={selectWorkspace}
-          mutateGroups={mutateGroups}
-          duplicateWorkspace={duplicateWorkspace}
-          deleteWorkspace={deleteWorkspace}
-          copyWorkspace={copyWorkspace}
-          pasteWorkspace={pasteWorkspace}
-          renameWorkspace={renameWorkspace}
-          prompt={prompt}
+          homeVisible={homeVisible}
+          showHome={() => setHomeVisible(true)}
+          openRecent={selectRecentProject}
+          newProject={newProject}
+          openProject={openProject}
+          closeProject={() => void closeProject()}
           showMenu={showMenu}
-          status={status}
         />
-        <main className="editor">
-          {project && <TabBar project={project} tabs={tabs} active={activeWorkspaceID} select={selectWorkspace} close={closeTab} />}
-          {project && activeWorkspaceID ? (
-            <ReactFlowProvider>
-              <WorkflowCanvas
-                project={project}
-                workspaceID={activeWorkspaceID}
-                updateDocument={updateDocument}
-                replaceProject={(loaded) => { setProject(loaded); setDirty(false); }}
-                prompt={prompt}
-                showStatus={setStatus}
-              />
-            </ReactFlowProvider>
-          ) : (
-            <div className="welcome">
-              <PackageOpen />
-              <h1>{project ? "No workspace open" : "Open a bot project"}</h1>
-              <div>
-                <button className="primary" onClick={newProject}>New Project</button>
-                <button onClick={openProject}>Open Project</button>
-              </div>
-            </div>
-          )}
-        </main>
+        {homeVisible ? (
+          <HomeScreen
+            settings={settings}
+            status={status}
+            newProject={newProject}
+            openProject={openProject}
+            openRecent={selectRecentProject}
+          />
+        ) : (
+          <>
+            <WorkspaceSidebar
+              project={project}
+              activeWorkspaceID={activeWorkspaceID}
+              selectWorkspace={selectWorkspace}
+              mutateGroups={mutateGroups}
+              duplicateWorkspace={duplicateWorkspace}
+              deleteWorkspace={deleteWorkspace}
+              copyWorkspace={copyWorkspace}
+              pasteWorkspace={pasteWorkspace}
+              renameWorkspace={renameWorkspace}
+              prompt={prompt}
+              showMenu={showMenu}
+              status={status}
+            />
+            <main className="editor">
+              {project && <TabBar project={project} tabs={tabs} active={activeWorkspaceID} select={selectWorkspace} close={closeTab} />}
+              {project && activeWorkspaceID ? (
+                <ReactFlowProvider>
+                  <WorkflowCanvas
+                    project={project}
+                    workspaceID={activeWorkspaceID}
+                    updateDocument={updateDocument}
+                    replaceProject={(loaded) => { setProject(loaded); setDirty(false); }}
+                    prompt={prompt}
+                    showStatus={setStatus}
+                  />
+                </ReactFlowProvider>
+              ) : (
+                <div className="welcome">
+                  <PackageOpen />
+                  <h1>No workspace open</h1>
+                </div>
+              )}
+            </main>
+          </>
+        )}
       </div>
       {promptRequest && <PromptDialog request={promptRequest} close={closePrompt} />}
       {menu && <ContextMenu menu={menu} dismiss={() => setMenu(null)} />}

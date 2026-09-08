@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { connectBlocks, removeConnections } from "./editor-model";
+import { connectBlocks, minimumBlockHeight, removeConnections } from "./editor-model";
 import type { BlockDefinition, WorkflowDocument } from "./types";
 
 const definition: BlockDefinition = {
@@ -41,5 +41,30 @@ describe("workflow editing", () => {
     const current = document();
     current.blocks[1].definition = incompatible;
     expect(connectBlocks(current, "source", "output", "target", "input").connections).toHaveLength(0);
+  });
+
+  test("accounts for repeatable ports when calculating a block's minimum height", () => {
+    const block = document().blocks[0];
+    const input = definition.inputs[0];
+    block.definition = {
+      ...definition,
+      inputs: ["action", "channel", "poll", "file", "embed", "row", "text"].map((id, index) => ({
+        ...input,
+        id,
+        allowsMultipleConnections: index >= 3
+      })),
+      options: [
+        { id: "type", name: "Send / Reply", description: "", type: "SELECT", choices: {}, choiceOrder: [], defaultValue: "" },
+        { id: "silent", name: "Silent Message", description: "", type: "SELECT", choices: {}, choiceOrder: [], defaultValue: "" },
+        { id: "text", name: "Source Text", description: "", type: "TEXT", choices: {}, choiceOrder: [], defaultValue: "" }
+      ],
+      outputs: ["action", "message", "error"].map((id) => ({ ...definition.outputs[0], id }))
+    };
+    block.inputWireValues = {
+      action: "a", channel: "b", poll: "c",
+      file: ["d"], embed: ["e"], row: ["f"], text: ["g"]
+    };
+
+    expect(minimumBlockHeight(block)).toBe(388);
   });
 });

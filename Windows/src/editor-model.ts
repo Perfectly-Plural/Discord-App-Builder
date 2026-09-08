@@ -43,6 +43,34 @@ export function defaultOptionValue(option: BlockOption): unknown {
   return "";
 }
 
+export function minimumBlockHeight(
+  block: WorkflowBlock,
+  connectionCounts: Record<string, number> = {}
+): number {
+  const rowCount = (ports: BlockPort[], direction: "input" | "output") => ports.reduce((total, port) => {
+    if (!port.allowsMultipleConnections) return total + 1;
+    const connected = connectionCounts[`${direction}:${port.id}`] || 0;
+    const storedValue = direction === "input" ? block.inputWireValues[port.id] : undefined;
+    const stored = Array.isArray(storedValue) ? storedValue.length : 0;
+    return total + Math.max(connected, stored) + 1;
+  }, 0);
+
+  const inputRows = rowCount(block.definition.inputs, "input");
+  const outputRows = rowCount(block.definition.outputs, "output");
+  const portRows = Math.max(inputRows, outputRows);
+  const portContentHeight = portRows > 0 ? portRows * 22 + (portRows - 1) * 7 : 0;
+
+  const optionContentHeight = block.definition.options.reduce((height, option) => {
+    const controlHeight = option.type === "TEXT" || option.type === "UNKNOWN"
+      ? 48
+      : option.type === "MULTISELECT" ? 58 : 29;
+    return height + 22 + 3 + controlHeight;
+  }, 0) + Math.max(0, block.definition.options.length - 1) * 8;
+
+  // Header (39) + body top/bottom padding (11 + 26) + the tallest body column.
+  return Math.max(140, 76 + Math.max(portContentHeight, optionContentHeight));
+}
+
 export function createBlock(
   definition: BlockDefinition,
   workspaceID: string,

@@ -12,23 +12,17 @@ function packagedTemplates() {
   return null;
 }
 
-function rawTemplate(name) {
-  const packaged = packagedTemplates();
-  if (packaged) {
-    if (typeof packaged[name] !== "string") throw new Error(`Bundled template ${name} is missing.`);
-    return packaged[name];
-  }
-  const source = fs.readFileSync(
-    path.join(__dirname, "..", "..", "Sources", "DiscordAppBuilder", "ProjectTemplates.swift"),
+function sharedTemplates() {
+  return JSON.parse(fs.readFileSync(
+    path.join(__dirname, "..", "..", "Shared", "project-templates.json"),
     "utf8"
-  );
-  const marker = `static let ${name} = #\"\"\"`;
-  const start = source.indexOf(marker);
-  if (start < 0) throw new Error(`Bundled template ${name} is missing.`);
-  const contentStart = source.indexOf("\n", start) + 1;
-  const end = source.indexOf('\n    \"\"\"#', contentStart);
-  if (end < 0) throw new Error(`Bundled template ${name} is incomplete.`);
-  return source.slice(contentStart, end).replace(/^    /gm, "");
+  ));
+}
+
+function rawTemplate(name) {
+  const templates = packagedTemplates() || sharedTemplates();
+  if (typeof templates[name] !== "string") throw new Error(`Bundled template ${name} is missing.`);
+  return templates[name];
 }
 
 function configJSON(applicationName, applicationVersion = "1.0.0") {
