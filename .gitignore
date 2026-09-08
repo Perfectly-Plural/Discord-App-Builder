@@ -1,0 +1,7 @@
+.DS_Store
+*.xcodeproj/
+DerivedData/
+dist/
+Windows/node_modules/
+Windows/dist-renderer/
+Windows/.vite/

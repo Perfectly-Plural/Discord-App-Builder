@@ -1,0 +1,197 @@
+name: Build tagged release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tagged-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify application
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: Windows
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: Windows/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run checks
+        run: |
+          npm run typecheck
+          npm test
+
+  build-linux:
+    name: Linux ${{ matrix.arch }}
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    defaults:
+      run:
+        working-directory: Windows
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: Windows/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Apply tag version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          npm version "$version" --no-git-tag-version --allow-same-version
+
+      - name: Install Flatpak build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes flatpak flatpak-builder rpm
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - name: Build renderer
+        run: npm run build:renderer
+
+      - name: Build Linux packages
+        run: |
+          npm run package:linux:release:${{ matrix.arch }}
+          npm run package:linux:flatpak:${{ matrix.arch }}
+
+      - name: Verify Linux packages
+        run: |
+          for extension in deb rpm zip flatpak; do
+            mapfile -t matches < <(find dist -maxdepth 1 -type f -name "*.${extension}")
+            test "${#matches[@]}" -eq 1
+            test "$(stat -c%s "${matches[0]}")" -gt 10000000
+          done
+
+      - name: Stage Linux packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: |
+            Windows/dist/*.deb
+            Windows/dist/*.rpm
+            Windows/dist/*.zip
+            Windows/dist/*.flatpak
+          if-no-files-found: error
+          retention-days: 7
+
+  build-windows:
+    name: Windows ${{ matrix.arch }} ZIP
+    needs: verify
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    defaults:
+      run:
+        working-directory: Windows
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: Windows/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Apply tag version
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          npm version $version --no-git-tag-version --allow-same-version
+
+      - name: Build Windows ZIP
+        run: |
+          npm run build:renderer
+          npm run package:windows:zip:${{ matrix.arch }}
+
+      - name: Verify Windows ZIP
+        shell: pwsh
+        run: |
+          $packages = @(Get-ChildItem dist -Filter "*.zip" -File)
+          if ($packages.Count -ne 1) {
+            throw "Expected one Windows ZIP, found $($packages.Count)."
+          }
+          if ($packages[0].Length -le 10MB) {
+            throw "$($packages[0].Name) is unexpectedly small."
+          }
+
+      - name: Stage Windows ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: Windows/dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download release packages
+        uses: actions/download-artifact@v4
+        with:
+          path: release-packages
+          merge-multiple: true
+
+      - name: Verify complete release set
+        run: |
+          test "$(find release-packages -maxdepth 1 -type f -name '*.deb' | wc -l)" -eq 2
+          test "$(find release-packages -maxdepth 1 -type f -name '*.rpm' | wc -l)" -eq 2
+          test "$(find release-packages -maxdepth 1 -type f -name '*.flatpak' | wc -l)" -eq 2
+          test "$(find release-packages -maxdepth 1 -type f -name 'Discord-App-Builder-Linux-*.zip' | wc -l)" -eq 2
+          test "$(find release-packages -maxdepth 1 -type f -name 'Discord-App-Builder-Windows-*.zip' | wc -l)" -eq 2
+          test "$(find release-packages -maxdepth 1 -type f | wc -l)" -eq 10
+
+      - name: Create checksum manifest
+        working-directory: release-packages
+        run: sha256sum * > SHA256SUMS.txt
+
+      - name: Create release and upload packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "Discord App Builder $RELEASE_TAG"
+          fi
+          gh release upload "$RELEASE_TAG" release-packages/* --clobber
